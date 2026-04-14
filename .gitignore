@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+recordings/
+crowcall.json
+vendor/modem/encode
+vendor/modem/decode
+vendor/modem/freezer
+vendor/disorders/awgn
+vendor/disorders/cfo
+vendor/disorders/sfo
+vendor/disorders/multipath

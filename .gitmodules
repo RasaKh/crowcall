@@ -1,0 +1,12 @@
+[submodule "vendor/code"]
+	path = vendor/code
+	url = https://github.com/aicodix/code.git
+[submodule "vendor/dsp"]
+	path = vendor/dsp
+	url = https://github.com/aicodix/dsp.git
+[submodule "vendor/modem"]
+	path = vendor/modem
+	url = https://github.com/aicodix/modem.git
+[submodule "vendor/disorders"]
+	path = vendor/disorders
+	url = https://github.com/aicodix/disorders.git
