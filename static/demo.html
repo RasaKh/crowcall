@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>crowcall · live radio demo · Rasa Khosrofar, M.D.</title>
+<meta name="description" content="Live two-station crowcall demo: codec2 voice, text and small files modulated through the real aicodix OFDM modem over a simulated HF radio channel.">
+<style>
+  :root {
+    --navy: #1f3a5c;
+    --navy-deep: #17293f;
+    --navy-mid: #2a4059;
+    --chassis: #161e27;
+    --line: #2a3744;
+    --ink: #e3eaee;
+    --dim: #9db0c0;
+    --phosphor: #ffb547;
+    --patina: #6f9a8d;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--chassis); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; }
+
+  .masthead {
+    background: var(--navy);
+    border-bottom: 2px solid #121c27;
+    padding: 9px 18px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    flex: 0 0 auto;
+  }
+  .brand { font-size: 17px; font-weight: 600; color: #fff; letter-spacing: .01em; }
+  .subtitle { font-size: 13px; color: #c9d4e0; }
+  .masthead a.back {
+    margin-left: auto; color: #c9d4e0; text-decoration: none; font-size: 13px;
+    padding: 4px 9px; border-radius: 3px; border: 1px solid rgba(255,255,255,.18);
+  }
+  .masthead a.back:hover { color: #fff; background: var(--navy-mid); }
+
+  .subbar {
+    background: var(--navy-deep);
+    border-bottom: 1px solid var(--line);
+    padding: 8px 18px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    font-size: 13px; color: #c9d4e0;
+    flex: 0 0 auto;
+  }
+  .guide { flex: 1 1 420px; line-height: 1.45; }
+  .guide b { color: #fff; font-weight: 600; }
+  .guide code { color: var(--phosphor); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+
+  .controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .btn {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase;
+    padding: 5px 10px; border-radius: 3px; cursor: pointer;
+    border: 1px solid #354c66; background: var(--navy-mid); color: #dce6f0;
+    text-decoration: none; display: inline-flex; align-items: center;
+  }
+  .btn:hover { border-color: var(--patina); color: #fff; }
+  .btn.active { background: var(--patina); border-color: var(--patina); color: #0e161d; font-weight: 600; }
+  .sep { width: 1px; height: 18px; background: #304760; margin: 0 3px; }
+
+  .stage {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px;
+    background: #0d1319;
+  }
+  .stage.only-alpha { grid-template-columns: 1fr; }
+  .stage.only-alpha .pane-bravo { display: none; }
+  .stage.only-bravo { grid-template-columns: 1fr; }
+  .stage.only-bravo .pane-alpha { display: none; }
+
+  @media (max-width: 1120px) {
+    .stage { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    .stage.only-alpha, .stage.only-bravo { grid-template-rows: 1fr; }
+  }
+
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--chassis); }
+  .pane-bar {
+    background: #1a242e; border-bottom: 1px solid var(--line);
+    padding: 4px 12px; display: flex; align-items: center; gap: 10px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--dim);
+    flex: 0 0 auto;
+  }
+  .pane-bar .tag { color: var(--phosphor); font-weight: 600; letter-spacing: .08em; }
+  .pane-bar a { margin-left: auto; color: var(--patina); text-decoration: none; }
+  .pane-bar a:hover { color: var(--phosphor); }
+  iframe { flex: 1 1 auto; width: 100%; border: 0; background: var(--chassis); min-height: 520px; }
+</style>
+</head>
+<body>
+  <header class="masthead">
+    <span class="brand">crowcall</span>
+    <span class="subtitle">Voice, text and files over modulated radio audio (codec2 + aicodix OFDM)</span>
+    <a class="back" href="https://khosrofar.me">← khosrofar.me</a>
+  </header>
+
+  <div class="subbar">
+    <div class="guide">
+      Two live stations (<b>ALPHA</b> and <b>BRAVO</b>) connected through the real <code>aicodix</code> OFDM modem over a simulated HF audio channel.
+      Click <b>Send sample voice clip</b>, hold to record, or send text/small files (up to 16 KB) on one side and watch chunks arrive on the other.
+      Try lowering <b>Signal</b> toward the <code>9.5 dB</code> cliff or raising <b>Fade chance</b> on the receiver to watch automatic chunk repair.
+    </div>
+    <div class="controls" role="group" aria-label="Station layout">
+      <button type="button" class="btn active" data-view="split">Side-by-side</button>
+      <button type="button" class="btn" data-view="alpha">ALPHA</button>
+      <button type="button" class="btn" data-view="bravo">BRAVO</button>
+      <span class="sep" aria-hidden="true"></span>
+      <a class="btn" href="/alpha/" target="_blank" rel="noopener">ALPHA ↗</a>
+      <a class="btn" href="/bravo/" target="_blank" rel="noopener">BRAVO ↗</a>
+    </div>
+  </div>
+
+  <main class="stage" id="stage">
+    <section class="pane pane-alpha">
+      <div class="pane-bar">
+        <span class="tag">STATION ALPHA</span>
+        <span>real aicodix OFDM · shared demo channel</span>
+        <a href="/alpha/" target="_blank" rel="noopener">Open full tab ↗</a>
+      </div>
+      <iframe src="/alpha/?embed=1" title="crowcall station ALPHA" allow="microphone"></iframe>
+    </section>
+
+    <section class="pane pane-bravo">
+      <div class="pane-bar">
+        <span class="tag">STATION BRAVO</span>
+        <span>real aicodix OFDM · shared demo channel</span>
+        <a href="/bravo/" target="_blank" rel="noopener">Open full tab ↗</a>
+      </div>
+      <iframe src="/bravo/?embed=1" title="crowcall station BRAVO" allow="microphone"></iframe>
+    </section>
+  </main>
+
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  var btns = document.querySelectorAll('.controls button[data-view]');
+  function setView(v) {
+    stage.classList.remove('only-alpha', 'only-bravo');
+    if (v === 'alpha') stage.classList.add('only-alpha');
+    if (v === 'bravo') stage.classList.add('only-bravo');
+    btns.forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-view') === v);
+    });
+  }
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () { setView(b.getAttribute('data-view')); });
+  });
+})();
+</script>
+</body>
+</html>
