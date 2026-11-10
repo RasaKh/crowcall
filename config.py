@@ -15,7 +15,10 @@ import threading
 
 
 DEFAULTS = {
+    "call": "ANON",
     "auto_repair": True,
+    "auto_adapt": True,
+    "auto_retry": True,
     "pacing": True,
     "use_vad": True,
     "save": True,
@@ -24,7 +27,35 @@ DEFAULTS = {
     "mode": "1400",
     "voice_modem": "compact",
     "debug_tone_hz": 0.0,
+    "debug_tone_ms": 120,
+    "vox_slack_ms": 60,
 }
+
+
+def _coerce_field(key: str, val):
+    default = DEFAULTS[key]
+    if isinstance(default, bool):
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)) and val in (0, 1):
+            return bool(val)
+        if isinstance(val, str) and val.lower() in ("true", "false"):
+            return val.lower() == "true"
+        return default
+    if isinstance(default, float):
+        try:
+            f = float(val)
+            return f if 0.0 <= f <= 20000.0 else default
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, int):
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, str):
+        return val if isinstance(val, str) and val.strip() else default
+    return default
 
 
 class ConfigStore:
@@ -40,10 +71,12 @@ class ConfigStore:
                 raw = json.load(fh)
         except (OSError, ValueError, TypeError):
             return dict(DEFAULTS)
+        if not isinstance(raw, dict):
+            return dict(DEFAULTS)
         out = dict(DEFAULTS)
         for k in DEFAULTS:
             if k in raw:
-                out[k] = raw[k]
+                out[k] = _coerce_field(k, raw[k])
         return out
 
     def save(self, values: dict) -> None:

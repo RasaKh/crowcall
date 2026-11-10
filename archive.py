@@ -101,7 +101,14 @@ class Archive:
         # record that opens.
         self._orphans: list[tuple[float, bytes, int]] = []
         self._orphan_max = 12
+        self._cached_bytes: int | None = None
+        self._cached_count: int | None = None
         os.makedirs(self.root, exist_ok=True)
+
+    def _invalidate_cache(self):
+        with self._lock:
+            self._cached_bytes = None
+            self._cached_count = None
 
     # -- lifecycle -------------------------------------------------------
 
@@ -170,6 +177,7 @@ class Archive:
                 orphans, self._orphans = self._orphans, []
         for _, pcm, srate in orphans:
             self._write_failed(rec, _wav(pcm, srate))
+        self._invalidate_cache()
         return path
 
     def note(self, direction, msg_id, callsign=None, **fields):
@@ -238,14 +246,15 @@ class Archive:
             if not (ok and chunk_idx is not None):
                 self._write_failed(rec, _wav(_floats_to_i16(samples), rate))
                 if snr_db is not None:
-                    self.note(direction, msg_id,
+                    self.note(direction, msg_id, callsign=callsign,
                               last_snr_db=round(float(snr_db), 1))
                 return
             name = f"chunks/chunk-{chunk_idx:03d}.wav"
             rec["chunk_n"] += 1
         self._write(direction, msg_id, name, _wav(_floats_to_i16(samples), rate), callsign)
         if snr_db is not None:
-            self.note(direction, msg_id, last_snr_db=round(float(snr_db), 1))
+            self.note(direction, msg_id, callsign=callsign,
+                      last_snr_db=round(float(snr_db), 1))
 
     def save_payload(self, direction, msg_id, data: bytes, kind, name="", callsign=None):
         """Text lands as message.txt, a file under its own name so it is
@@ -261,14 +270,14 @@ class Archive:
         self._write(direction, msg_id, f"file/{safe}", data, callsign)
         self.note(direction, msg_id, callsign, file_name=safe, file_bytes=len(data))
 
-    def save_raw_stream(self, direction, msg_id, stream: bytes):
+    def save_raw_stream(self, direction, msg_id, stream: bytes, callsign=None):
         """The reassembled bytes exactly as they arrived, holes and all. Kept
         only when something went wrong, since that is when you want to pick
         through it."""
         if not self.save or not stream:
             return
-        self._write(direction, msg_id, "stream.raw", stream)
-        self.note(direction, msg_id, raw_stream_bytes=len(stream))
+        self._write(direction, msg_id, "stream.raw", stream, callsign)
+        self.note(direction, msg_id, callsign=callsign, raw_stream_bytes=len(stream))
 
     # -- finish ----------------------------------------------------------
 
@@ -292,6 +301,7 @@ class Archive:
         with open(os.path.join(rec["dir"], "meta.json"), "w") as fh:
             json.dump(rec["meta"], fh, indent=2, sort_keys=True, default=str)
         self.prune()
+        self._invalidate_cache()
         return os.path.basename(rec["dir"])
 
     # -- browsing --------------------------------------------------------
@@ -351,6 +361,7 @@ class Archive:
         if not base:
             return False
         shutil.rmtree(base, ignore_errors=True)
+        self._invalidate_cache()
         return True
 
     # -- housekeeping ----------------------------------------------------
@@ -381,10 +392,15 @@ class Archive:
                               default=str)
             except OSError:
                 pass
+        if stale:
+            self._invalidate_cache()
         return len(stale)
 
     def total_bytes(self) -> int:
-        return dir_size(self.root)
+        with self._lock:
+            if self._cached_bytes is None:
+                self._cached_bytes = dir_size(self.root)
+            return self._cached_bytes
 
     def prune(self):
         """Drop the oldest records once the archive exceeds its cap. Modem
@@ -403,8 +419,14 @@ class Archive:
         return removed
 
     def state(self) -> dict:
+        with self._lock:
+            if self._cached_bytes is None or self._cached_count is None:
+                self._cached_bytes = dir_size(self.root)
+                self._cached_count = len([
+                    d for d in os.listdir(self.root)
+                    if os.path.isdir(os.path.join(self.root, d))
+                ])
+            b, c = self._cached_bytes, self._cached_count
         return {"save": self.save, "save_modem": self.save_modem,
-                "root": self.root, "bytes": self.total_bytes(),
-                "max_bytes": self.max_bytes,
-                "count": len([d for d in os.listdir(self.root)
-                              if os.path.isdir(os.path.join(self.root, d))])}
+                "root": self.root, "bytes": b,
+                "max_bytes": self.max_bytes, "count": c}

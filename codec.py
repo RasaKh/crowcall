@@ -95,8 +95,14 @@ def _run(cmd, timeout=60):
     return p.stdout
 
 
+_SCRATCH_DIR = ("/dev/shm"
+                if (os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK))
+                else None)
+
+
 def _tmp(suffix):
-    fd, path = tempfile.mkstemp(prefix="crowcall-", suffix=suffix)
+    fd, path = tempfile.mkstemp(prefix="crowcall-", suffix=suffix,
+                                dir=_SCRATCH_DIR)
     os.close(fd)
     return path
 
@@ -281,19 +287,31 @@ def pcm_to_wav(pcm: bytes, rate: int = SAMPLE_RATE) -> bytes:
 def generate_beep(frequency: float, duration_ms: int = 150,
                   rate: int = SAMPLE_RATE, volume: float = 0.3) -> bytes:
     n = int(rate * duration_ms / 1000.0)
-    amp = 32767 * volume
-    # 5 ms raised-cosine edges, so the beep does not click
-    edge = max(1, int(rate * 0.005))
-    out = bytearray()
-    for i in range(n):
-        env = 1.0
-        if i < edge:
-            env = 0.5 - 0.5 * math.cos(math.pi * i / edge)
-        elif i > n - edge:
-            env = 0.5 - 0.5 * math.cos(math.pi * (n - i) / edge)
-        out += struct.pack("<h", int(amp * env
-                                     * math.sin(2 * math.pi * frequency * i / rate)))
-    return bytes(out)
+    if n <= 0:
+        return b""
+    try:
+        import numpy as np
+        t = np.arange(n, dtype="float32")
+        env = np.ones(n, dtype="float32")
+        edge = max(1, min(n // 2, int(rate * 0.005)))
+        ramp = 0.5 - 0.5 * np.cos(np.pi * np.arange(edge, dtype="float32") / edge)
+        env[:edge] = ramp
+        env[-edge:] = ramp[::-1]
+        wave = np.sin(2.0 * np.pi * frequency * t / rate) * env * (32767.0 * volume)
+        return np.clip(wave, -32768, 32767).astype("<i2").tobytes()
+    except ImportError:
+        amp = 32767 * volume
+        edge = max(1, int(rate * 0.005))
+        out = bytearray()
+        for i in range(n):
+            env = 1.0
+            if i < edge:
+                env = 0.5 - 0.5 * math.cos(math.pi * i / edge)
+            elif i > n - edge:
+                env = 0.5 - 0.5 * math.cos(math.pi * (n - i) / edge)
+            out += struct.pack("<h", int(amp * env
+                                         * math.sin(2 * math.pi * frequency * i / rate)))
+        return bytes(out)
 
 
 def add_radio_texture(pcm: bytes, rate: int = SAMPLE_RATE) -> bytes:
