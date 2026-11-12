@@ -137,85 +137,123 @@ def debug_tone(hz: float, rate: int = RATE, duration_s: float = DEBUG_TONE_S,
     return (np.sin(2 * np.pi * hz * t) * float(volume) * env).astype("float32")
 
 
-def prepend_debug_tone(samples, rate: int, hz: float | None):
+def prepend_debug_tone(samples, rate: int, hz: float | None,
+                       duration_s: float = DEBUG_TONE_S):
     import numpy as np
-    if hz is None:
+    if hz is None or duration_s <= 0:
         return np.asarray(samples, dtype="float32")
-    return np.concatenate([debug_tone(hz, rate),
+    return np.concatenate([debug_tone(hz, rate, duration_s=duration_s),
                            np.asarray(samples, dtype="float32")])
 
 
-def strip_debug_tone(samples, rate: int, hz: float | None = None,
-                     duration_s: float = DEBUG_TONE_S):
-    """Remove a diagnostic prefix from a soundcard candidate.
+def strip_debug_tone_info(samples, rate: int, hz: float | None = None,
+                          max_duration_s: float = 0.600) -> tuple:
+    """Locate and strip a leading diagnostic/VOX pilot tone of up to max_duration_s.
 
-    Soundcard framing includes a small pre-trigger pad and the frequency may
-    differ between stations, so locate the strongest early sinusoid rather
-    than dropping a fixed number of samples.  With ``hz`` supplied the search
-    is narrowly correlated; otherwise a short FFT chooses the dominant tone.
-    Returns ``(samples_without_tone, detected_hz)``.
+    Unlike a fixed-length cut, this scans forward from the first detected tone
+    window to find the exact sample where the coherent sinusoid ends (in case
+    a walkie-talkie's VOX circuit chopped off the first N ms of the tone).
+
+    Returns: (samples_without_tone, detected_hz, surviving_tone_s)
     """
     import numpy as np
     x = np.asarray(samples, dtype="float32").reshape(-1)
     if len(x) < int(rate * 0.06):
-        return x, None
-    search_n = min(len(x), int(rate * 0.30))
+        return x, None, 0.0
+    search_n = min(len(x), int(rate * (max_duration_s + 0.18)))
     head = x[:search_n].astype("float64")
     win = max(64, int(rate * 0.02))
     if hz is not None:
         freqs = [float(hz)]
     else:
-        nfft = 1 << max(10, (search_n - 1).bit_length())
-        spec = np.abs(np.fft.rfft(head * np.hanning(search_n), n=nfft))
+        tone_head = head[:min(len(head), int(rate * 0.30))]
+        nfft = 1 << max(10, (len(tone_head) - 1).bit_length())
+        spec = np.abs(np.fft.rfft(tone_head * np.hanning(len(tone_head)), n=nfft))
         lo, hi = int(20 * nfft / rate), int(min(rate / 2 - 20, 6000) * nfft / rate)
         if hi <= lo:
-            return x, None
+            return x, None, 0.0
         freqs = [float(np.argmax(spec[lo:hi]) + lo) * rate / nfft]
+
     best, best_score, best_hz = 0, 0.0, None
     for f in freqs:
         t = np.arange(win, dtype="float64") / rate
         ref = np.exp(-2j * np.pi * f * t)
-        limit = max(1, min(search_n - win, int(rate * 0.22)))
+        limit = max(1, min(len(head) - win, int(rate * 0.22)))
         for start in range(0, limit, max(1, win // 2)):
             seg = head[start:start + win]
             score = abs(np.dot(seg, ref)) / (np.linalg.norm(seg) * np.linalg.norm(ref) + 1e-12)
-            # Pick the first convincing window, not the numerically strongest
-            # one.  A pure tone produces many equally strong overlapping
-            # windows; choosing the maximum can move the cut arbitrarily deep
-            # into the prefix because of floating-point noise.
             if score >= 0.35 and best_hz is None:
                 best, best_score, best_hz = start, score, f
                 break
             if score > best_score:
                 best, best_score, best_hz = start, score, f
-    # A modem preamble is not a stable single sinusoid; require a meaningful
-    # correlation before treating the candidate as tone-prefixed.
-    if best_score < 0.35:
-        return x, None
-    if hz is None:
-        # A normal modem preamble (or an accidental carrier) can correlate
-        # strongly at one frequency.  A diagnostic prefix is different: its
-        # stable sinusoid ends after DEBUG_TONE_S.  Reject candidates that stay
-        # just as stable after the proposed cut.
-        after = best + int(rate * duration_s)
-        if after + win <= len(head):
-            seg = head[after:after + win]
-            post = abs(np.dot(seg, np.exp(-2j * np.pi * best_hz * np.arange(win) / rate))) / (
-                np.linalg.norm(seg) * np.sqrt(win) + 1e-12)
-            if post >= 0.55:
-                return x, None
-    cut = min(len(x), best + int(rate * duration_s))
-    return x[cut:], best_hz
+    if best_score < 0.35 or best_hz is None:
+        return x, None, 0.0
+
+    # Walk forward in fine steps (win // 4 = 5 ms) to find where the tone ends
+    t = np.arange(win, dtype="float64") / rate
+    ref = np.exp(-2j * np.pi * best_hz * t)
+    ref_norm = np.linalg.norm(ref)
+    step = max(1, win // 4)
+    max_end = min(len(head) - win, best + int(rate * max_duration_s))
+    last_tone = best
+    hit_end_of_search = True
+    for pos in range(best, max_end + 1, step):
+        seg = head[pos:pos + win]
+        sc = abs(np.dot(seg, ref)) / (np.linalg.norm(seg) * ref_norm + 1e-12)
+        if sc >= 0.35:
+            last_tone = pos
+        else:
+            hit_end_of_search = False
+            break
+
+    # If the sinusoid never stopped even past max_duration_s, it's a continuous
+    # carrier/interference, not a finite prefix tone.
+    if hit_end_of_search and max_end >= best + int(rate * max_duration_s) - step:
+        return x, None, 0.0
+
+    cut = min(len(x), last_tone + win)
+    surviving_s = max(0.0, (cut - best) / float(rate))
+    return x[cut:], best_hz, round(surviving_s, 4)
+
+
+def strip_debug_tone(samples, rate: int, hz: float | None = None,
+                     duration_s: float = DEBUG_TONE_S):
+    """Backwards-compatible wrapper returning (samples_without_tone, detected_hz)."""
+    trimmed, det_hz, heard_s = strip_debug_tone_info(
+        samples, rate, hz=hz, max_duration_s=max(0.600, duration_s * 1.5))
+    if det_hz is not None and abs(heard_s - duration_s) <= 0.020:
+        import numpy as np
+        x = np.asarray(samples, dtype="float32").reshape(-1)
+        cut_measured = len(x) - len(trimmed)
+        best_est = max(0, cut_measured - int(round(heard_s * rate)))
+        cut_exact = min(len(x), best_est + int(round(duration_s * rate)))
+        return x[cut_exact:], det_hz
+    return trimmed, det_hz
 
 
 # --------------------------------------------------------------------------
+
+def _default_vendor() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for rel in (("crowcall", "vendor"), ("vendor",)):
+        local = os.path.join(here, *rel)
+        if os.path.isdir(local):
+            return local
+    return os.path.expanduser("~/crowcall/vendor")
+
+
+_SCRATCH_DIR = ("/dev/shm"
+                if (os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK))
+                else None)
+
 
 class AicodixModem:
     """Thin wrapper over the aicodix encode/decode binaries."""
 
     def __init__(self, vendor=None, callsign="CROWCALL", carrier=CARRIER,
                  default_mode=None):
-        vendor = vendor or os.path.expanduser("~/crowcall/vendor")
+        vendor = vendor or _default_vendor()
         self.encode_bin = os.path.join(vendor, "modem", "encode")
         self.decode_bin = os.path.join(vendor, "modem", "decode")
         self.dis = os.path.join(vendor, "disorders")
@@ -229,6 +267,20 @@ class AicodixModem:
         self.fallbacks_used = 0
         self.rate = RATE          # replaced by probe_rate()
         self._lock = threading.Lock()
+        missing = [b for b in (self.encode_bin, self.decode_bin)
+                   if not (os.path.isfile(b) and os.access(b, os.X_OK))]
+        if missing:
+            modem_dir = os.path.join(vendor, "modem")
+            if (os.path.isfile(os.path.join(modem_dir, "Makefile"))
+                    and shutil.which("make") and shutil.which("g++")):
+                try:
+                    subprocess.run(
+                        ["make", "encode", "decode", "CXX=g++ -march=native"],
+                        cwd=modem_dir, timeout=120, check=False,
+                        capture_output=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         for b in (self.encode_bin, self.decode_bin):
             if not (os.path.isfile(b) and os.access(b, os.X_OK)):
                 raise ModemError(
@@ -239,7 +291,8 @@ class AicodixModem:
 
     @staticmethod
     def _tmp(suffix):
-        fd, p = tempfile.mkstemp(prefix="crowcall-modem-", suffix=suffix)
+        fd, p = tempfile.mkstemp(prefix="crowcall-modem-", suffix=suffix,
+                                 dir=_SCRATCH_DIR)
         os.close(fd)
         return p
 
@@ -455,6 +508,7 @@ class BurstDetector:
         self._quiet = 0
         self._open = False
         self._pre = []                  # rolling pre-trigger padding
+        self._peak_rms = 0.0
         self.truncated = 0              # bursts that hit the cap (diagnostic)
 
     def _rms(self, block):
@@ -506,9 +560,13 @@ class BurstDetector:
                     self._buf = list(self._pre)
                     self._pre = []
                     self._quiet = 0
+                    self._peak_rms = float(r)
             else:
                 self._buf.append(seg)
-                self._quiet = self._quiet + 1 if r < self.floor * self.release else 0
+                if r > self._peak_rms:
+                    self._peak_rms = 0.8 * self._peak_rms + 0.2 * float(r)
+                quiet_thresh = max(self.floor * self.release, self._peak_rms * 0.18)
+                self._quiet = self._quiet + 1 if r < quiet_thresh else 0
                 length = len(self._buf) * self.win
                 capped = length >= self.max_len
                 if self._quiet >= self.hold or capped:
@@ -549,7 +607,7 @@ def concat_bursts(bursts, rate=RATE, gap_s=0.12):
 
 
 def available(vendor=None) -> dict:
-    vendor = vendor or os.path.expanduser("~/crowcall/vendor")
+    vendor = vendor or _default_vendor()
     enc = os.path.join(vendor, "modem", "encode")
     dec = os.path.join(vendor, "modem", "decode")
     return {
