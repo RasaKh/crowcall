@@ -43,6 +43,8 @@ single points of failure are the thing to avoid.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import struct
 import time
@@ -74,6 +76,44 @@ KIND_ROLE = {KIND_VOICE: "voice", KIND_TEXT: "text", KIND_FILE: "file"}
 
 F_REPAIR = 0x01
 KIND_SHIFT, KIND_MASK = 1, 0x07
+HOP_SHIFT, HOP_MASK, MAX_HOPS = 4, 0x03, 3
+
+_CHANNEL_KEY: bytes | None = None
+
+
+def set_channel_key(passphrase: str | None) -> None:
+    """Configure an optional pre-shared channel key (None or '' for cleartext)."""
+    global _CHANNEL_KEY
+    if not passphrase:
+        _CHANNEL_KEY = None
+        return
+    _CHANNEL_KEY = hashlib.pbkdf2_hmac(
+        "sha256", passphrase.encode("utf-8"), b"crowcall-v3-psk", 10000, dklen=32
+    )
+
+
+def _xor_keystream(key: bytes, header_without_crc: bytes, payload: bytes) -> bytes:
+    """Deterministic counter-mode keystream using BLAKE2s keyed with (key, header)."""
+    if not payload:
+        return b""
+    out = bytearray(len(payload))
+    nonce_base = hashlib.blake2s(header_without_crc, key=key, digest_size=24).digest()
+    for blk_idx, offset in enumerate(range(0, len(payload), 32)):
+        block = hashlib.blake2s(
+            nonce_base + blk_idx.to_bytes(4, "big"), key=key, digest_size=32
+        ).digest()
+        chunk = payload[offset:offset + 32]
+        for i, b in enumerate(chunk):
+            out[offset + i] = b ^ block[i]
+    return bytes(out)
+
+
+def _frame_check(head_zero_crc: bytes, wire_body: bytes) -> int:
+    """32-bit CRC32 when unkeyed, or 32-bit truncated HMAC-SHA256 when keyed."""
+    if _CHANNEL_KEY is None:
+        return zlib.crc32(head_zero_crc + wire_body) & 0xFFFFFFFF
+    tag = hmac.digest(_CHANNEL_KEY, head_zero_crc + wire_body, "sha256")[:4]
+    return int.from_bytes(tag, "big")
 
 # defined in modes.py so `usable` and `pack` can never disagree
 HDR_FMT = M.HDR_FMT
@@ -112,8 +152,10 @@ except ImportError:                              # codec is optional for tests
     pass
 
 
-def pack_flags(repair: bool = False, kind: int = KIND_VOICE) -> int:
-    return (F_REPAIR if repair else 0) | ((kind & KIND_MASK) << KIND_SHIFT)
+def pack_flags(repair: bool = False, kind: int = KIND_VOICE, hops: int = 0) -> int:
+    return ((F_REPAIR if repair else 0)
+            | ((kind & KIND_MASK) << KIND_SHIFT)
+            | ((min(MAX_HOPS, max(0, int(hops))) & HOP_MASK) << HOP_SHIFT))
 
 
 def is_repair(flags: int) -> bool:
@@ -122,6 +164,10 @@ def is_repair(flags: int) -> bool:
 
 def kind_of(flags: int) -> int:
     return (flags >> KIND_SHIFT) & KIND_MASK
+
+
+def hops_of(flags: int) -> int:
+    return (flags >> HOP_SHIFT) & HOP_MASK
 
 
 def pack_mode(c2mode: str, modem_mode) -> int:
@@ -258,9 +304,11 @@ def pack(ptype: int, callsign: str, msg_id: int, body: bytes = b"",
                         chunk_idx, total, len(body),
                         (mode >> 4) & 0xFF, mode & 0xFF, 0,
                         _call8(callsign))
-    crc = zlib.crc32(head0 + body) & 0xFFFFFFFF
+    wire_body = (_xor_keystream(_CHANNEL_KEY, head0[:48] + head0[52:], body)
+                 if _CHANNEL_KEY is not None else body)
+    crc = _frame_check(head0, wire_body)
     head = head0[:48] + struct.pack(">I", crc) + head0[52:]
-    out = head + body
+    out = head + wire_body
     return out.ljust(mm.payload, b"\x00") if pad else out
 
 
@@ -273,7 +321,7 @@ def unpack(data: bytes):
         struct.unpack(HDR_FMT, data[:HDR_LEN])
     if magic != MAGIC or ver != VERSION or hlen != HDR_LEN or ptype not in TYPE_NAMES:
         return None
-    if flags & 0xE0 or kind_of(flags) not in KIND_NAMES:
+    if flags & 0xC0 or kind_of(flags) not in KIND_NAMES:
         return None
     if source == 0 or origin == 0 or msg_id == 0 and ptype != T_BEACON:
         return None
@@ -292,12 +340,15 @@ def unpack(data: bytes):
         return None
     if station_id(call.decode("ascii", "replace").strip()) != source:
         return None
-    body = data[HDR_LEN:HDR_LEN + body_len]
-    check = zlib.crc32(data[:48] + b"\x00\x00\x00\x00" + data[52:HDR_LEN] + body) & 0xFFFFFFFF
-    if check != crc:
+    wire_body = data[HDR_LEN:HDR_LEN + body_len]
+    head0 = data[:48] + b"\x00\x00\x00\x00" + data[52:HDR_LEN]
+    check = _frame_check(head0, wire_body)
+    if not hmac.compare_digest(check.to_bytes(4, "big"), crc.to_bytes(4, "big")):
         return None
+    body = (_xor_keystream(_CHANNEL_KEY, data[:48] + data[52:HDR_LEN], wire_body)
+            if _CHANNEL_KEY is not None else wire_body)
     if ptype == T_BEACON:
-        if msg_id or total or idx or exchange or destination:
+        if msg_id or total or idx:
             return None
     elif ptype == T_DAT and total == 0:
         return None
@@ -309,6 +360,7 @@ def unpack(data: bytes):
             "modem_name": mm.name,
             "flags": flags, "repair": is_repair(flags),
             "kind": kind_of(flags),
+            "hops": hops_of(flags),
             "kind_name": KIND_NAMES.get(kind_of(flags), "?"),
             "body": body}
 
@@ -378,14 +430,16 @@ def _hms(seconds: float) -> str:
     return f"{s // 3600}h {(s % 3600) // 60:02d}m"
 
 
-def plan(nbytes: int, kind: str = "file", c2mode=DEFAULT_MODE) -> dict:
+def plan(nbytes: int, kind: str = "file", c2mode=DEFAULT_MODE,
+         voice_modem=None) -> dict:
     """What sending this costs, and which mode it will use."""
     if kind == "voice":
-        g = geom_for(c2mode, M.COMPACT)
+        mm = M.for_voice(voice_modem)
+        g = geom_for(c2mode, mm)
         n = max(1, -(-nbytes // g.payload))
         speech = nbytes * g.frame_s / g.frame_bytes
         air = n * g.air_s
-        return {"mode": M.COMPACT.name, "codec2": c2mode, "chunks": n,
+        return {"mode": mm.name, "codec2": c2mode, "chunks": n,
                 "bursts": n, "speech_s": round(speech, 2),
                 "air_s": round(air, 2), "air_human": _hms(air),
                 "chunk_speech_s": round(g.speech_s, 3),
@@ -655,9 +709,8 @@ class Assembler:
 
     def expected_duration(self) -> float:
         """How long the sender needs to send everything, from the header's own
-        chunk count. Data transfers repeat chunk 0 as a trailer, so one more
-        burst than there are chunks."""
-        extra = 0 if self.kind == KIND_VOICE else 1
+        chunk count. Data transfers with >1 chunk repeat chunk 0 as a trailer."""
+        extra = 0 if (self.kind == KIND_VOICE or self.total <= 1) else 1
         return (self.total + extra) * self.modem.air_s
 
     def sender_should_be_done(self) -> bool:
@@ -730,3 +783,229 @@ class Assembler:
 
     def lost_bytes(self) -> int:
         return len(self.missing()) * (self.chunk_bytes or self.modem.usable)
+
+
+class LinkHealthTracker:
+    """Dual-EMA link health controller with Mode Inertia (tenure stickiness),
+    Hysteresis Deadband expansion, Dwell-Time scaling, Slew-Rate Downshift Urgency,
+    and High-Headroom Upshift Incentive overrides."""
+
+    TIERS = ["control", "compact", "bulk"]  # Fine -> Balanced -> Quick
+    BASE_DOWNSHIFT_DWELL_S = 15.0
+    BASE_UPSHIFT_DWELL_S = 60.0
+    IDLE_FALLBACK_S = 300.0                 # 5 min silence resets to safe baseline
+
+    def __init__(self, slow_alpha: float = 0.15, fast_alpha: float = 0.50):
+        self.slow_alpha = slow_alpha
+        self.fast_alpha = fast_alpha
+        self.delivery_ema = 1.0             # slow EMA (long-term baseline)
+        self.fast_delivery_ema = 1.0        # fast EMA (short-term transient)
+        self.snr_ema: float | None = None
+        self.fast_snr_ema: float | None = None
+        self.snr_dev_ema = 0.0              # SNR mean absolute deviation (fading volatility)
+        self.tone_margin_ema: float | None = None
+        self.samples = 0
+        self.dwell_samples = 0              # observations in current operating mode (dwell count)
+        self.tenure_streak = 0              # consecutive healthy observations building mode_inertia
+        self.consecutive_drops = 0          # consecutive failed bursts
+        self.last_switch_at = 0.0
+        self.last_obs_at = 0.0
+        self.unconfirmed_streak = 0         # consecutive TX messages with no DONE/RREQ
+
+    @staticmethod
+    def _ema(cur: float | None, val: float, alpha: float) -> float:
+        return float(val) if cur is None else (1.0 - alpha) * cur + alpha * float(val)
+
+    @property
+    def mode_inertia(self) -> float:
+        """0.0 to 1.0 'tenure stickiness' score (mode inertia) earned by a mode
+        proving stable over time. Reaches 1.0 after 20 clean bursts in the current mode."""
+        if self.consecutive_drops >= 2:
+            return 0.0
+        return min(1.0, self.tenure_streak / 20.0)
+
+    @property
+    def tenure_stickiness(self) -> float:
+        """Alias for mode_inertia for telemetry/readability."""
+        return self.mode_inertia
+
+    def observe_burst(self, ok: bool, snr_db: float | None = None,
+                      tone_ms: float | None = None):
+        self.samples += 1
+        self.dwell_samples += 1
+        self.last_obs_at = time.time()
+        val = 1.0 if ok else 0.0
+        self.delivery_ema = self._ema(self.delivery_ema, val, self.slow_alpha)
+        self.fast_delivery_ema = self._ema(self.fast_delivery_ema, val, self.fast_alpha)
+        if ok:
+            self.consecutive_drops = 0
+            self.tenure_streak += 1
+        else:
+            self.consecutive_drops += 1
+            self.tenure_streak = (self.tenure_streak // 2
+                                  if self.consecutive_drops == 1 else 0)
+        if snr_db is not None:
+            s = float(snr_db)
+            dev = abs(s - (self.snr_ema if self.snr_ema is not None else s))
+            self.snr_ema = self._ema(self.snr_ema, s, self.slow_alpha)
+            self.fast_snr_ema = self._ema(self.fast_snr_ema, s, self.fast_alpha)
+            self.snr_dev_ema = self._ema(self.snr_dev_ema, dev, self.slow_alpha)
+        if tone_ms is not None and tone_ms > 0:
+            self.tone_margin_ema = self._ema(self.tone_margin_ema, float(tone_ms), self.slow_alpha)
+
+    def observe_message(self, total: int, lost_initial: int):
+        """Called on RX finalise OR when an inbound RREQ tells us how many chunks
+        a peer missed from our TX message."""
+        if total > 0:
+            self.samples += 1
+            self.dwell_samples += 1
+            self.last_obs_at = time.time()
+            ratio = max(0.0, min(1.0, (total - lost_initial) / float(total)))
+            self.delivery_ema = self._ema(self.delivery_ema, ratio, self.slow_alpha)
+            self.fast_delivery_ema = self._ema(self.fast_delivery_ema, ratio, self.fast_alpha)
+            if ratio >= 0.85:
+                self.tenure_streak += max(1, total // 4)
+            elif ratio < 0.65:
+                self.tenure_streak = 0
+
+    def note_tx_confirmed(self):
+        """Peer confirmed our transmission (via T_DONE or T_RREQ)."""
+        self.unconfirmed_streak = 0
+
+    def note_tx_unconfirmed(self):
+        """An outbound message timed out with zero response from any peer."""
+        self.unconfirmed_streak += 1
+        self.tenure_streak = 0
+        self.delivery_ema = self._ema(self.delivery_ema, 0.35, self.slow_alpha)
+        self.fast_delivery_ema = self._ema(self.fast_delivery_ema, 0.20, self.fast_alpha)
+
+    def _switching_incentives(self) -> tuple[bool, bool, float]:
+        negative_slew = max(0.0, self.delivery_ema - self.fast_delivery_ema)
+        downshift_urgency = (
+            self.consecutive_drops >= 3
+            or self.fast_delivery_ema < 0.50
+            or negative_slew >= 0.28
+            or (self.fast_snr_ema is not None and self.fast_snr_ema <= 10.3)
+        )
+        upshift_incentive = (
+            self.fast_delivery_ema >= 0.97
+            and self.delivery_ema >= 0.93
+            and self.snr_dev_ema < 1.2
+            and (self.snr_ema is not None and self.snr_ema >= 19.0)
+        )
+        snr_headroom_score = (
+            min(1.0, max(0.0, ((self.snr_ema or 12.0) - 14.0) / 8.0))
+            if self.snr_ema is not None else 0.0
+        )
+        crash_score = min(1.0, max(negative_slew / 0.30, self.consecutive_drops / 3.0))
+        switching_incentive_score = round(max(crash_score, snr_headroom_score), 2)
+        return downshift_urgency, upshift_incentive, switching_incentive_score
+
+    def _raw_target(self, cur_tier: int, now: float) -> tuple[int, str, str, str, str]:
+        if self.unconfirmed_streak >= 2:
+            return (0, "control", "700C", "compact",
+                    "Safe fallback: last 2 transmissions went unconfirmed — using Fine + 700C.")
+        if self.last_obs_at and (now - self.last_obs_at > self.IDLE_FALLBACK_S):
+            return (1, "compact", "1400", "bulk",
+                    "Channel idle >5m — reset to safe Balanced (compact + 1400) baseline.")
+
+        downshift_urgency, upshift_incentive, _ = self._switching_incentives()
+        deliv = (min(self.delivery_ema, self.fast_delivery_ema)
+                 if downshift_urgency else self.delivery_ema)
+        snr = (min(self.snr_ema or 99.0, self.fast_snr_ema or 99.0)
+               if (self.snr_ema is not None and downshift_urgency) else self.snr_ema)
+        fading = self.snr_dev_ema >= 2.5
+
+        effective_inertia = 0.0 if (downshift_urgency or upshift_incentive) else self.mode_inertia
+        hysteresis_deadband_deliv = 0.06 * effective_inertia
+        hysteresis_deadband_snr = 1.5 * effective_inertia
+        upshift_barrier_deliv = 0.03 * effective_inertia
+        upshift_barrier_snr = 1.0 * effective_inertia
+
+        up_to_2 = (deliv >= min(0.98, 0.94 + upshift_barrier_deliv)
+                   and (snr is None or snr >= 15.0 + upshift_barrier_snr) and not fading)
+        stay_in_2 = (deliv >= (0.88 - hysteresis_deadband_deliv)
+                     and (snr is None or snr >= (13.5 - hysteresis_deadband_snr)) and not fading)
+
+        up_to_1 = (deliv >= min(0.90, 0.78 + upshift_barrier_deliv)
+                   and (snr is None or snr >= 12.0 + upshift_barrier_snr))
+        stay_in_1 = (deliv >= (0.70 - hysteresis_deadband_deliv)
+                     and (snr is None or snr >= (11.0 - hysteresis_deadband_snr)))
+
+        if (cur_tier == 2 and stay_in_2) or (cur_tier < 2 and (up_to_2 or upshift_incentive)):
+            return (2, "bulk", "1400", "fast",
+                    "Link is clean & steady — Quick voice (0.5x air time) and Fast 3.68s data bursts.")
+        if (cur_tier >= 1 and stay_in_1) or (cur_tier == 0 and up_to_1):
+            c2 = "1200" if deliv < (0.80 - hysteresis_deadband_deliv * 0.5) else "1400"
+            return (1, "compact", c2, "bulk",
+                    "Moderate loss/fading — Balanced 1.2s bursts reduce hole size and dodge fades.")
+        return (0, "control", "700C", "compact",
+                "Heavy loss or slew-rate crash near 9.5 dB cliff — Fine voice + Codec2 700C minimizes holes and air time.")
+
+    def recommend(self, cur_voice_modem: str, cur_c2_mode: str) -> dict:
+        now = time.time()
+        cur_tier = self.TIERS.index(cur_voice_modem) if cur_voice_modem in self.TIERS else 1
+        target_tier, rec_voice, rec_c2, rec_data_cap, why = self._raw_target(cur_tier, now)
+        downshift_urgency, upshift_incentive, switching_incentive_score = self._switching_incentives()
+        inertia = self.mode_inertia
+
+        if target_tier > cur_tier + 1:
+            target_tier = cur_tier + 1
+            rec_voice = self.TIERS[target_tier]
+            rec_c2 = "1400"
+            rec_data_cap = "bulk"
+
+        dwell_elapsed_s = now - self.last_switch_at if self.last_switch_at else 9999.0
+        if target_tier < cur_tier:
+            required_dwell_s = (0.0 if downshift_urgency
+                                else self.BASE_DOWNSHIFT_DWELL_S * (1.0 + 0.5 * inertia))
+            remaining_dwell_s = max(0.0, required_dwell_s - dwell_elapsed_s)
+            ready = (remaining_dwell_s == 0.0 and (downshift_urgency or self.samples >= 2))
+        elif target_tier > cur_tier:
+            required_dwell_s = (self.BASE_UPSHIFT_DWELL_S * 0.5 if upshift_incentive
+                                else self.BASE_UPSHIFT_DWELL_S * (1.0 + 1.5 * inertia))
+            required_dwell_samples = 4 if upshift_incentive else int(5 + 6 * inertia)
+            remaining_dwell_s = max(0.0, required_dwell_s - dwell_elapsed_s)
+            ready = (remaining_dwell_s == 0.0 and self.dwell_samples >= required_dwell_samples)
+        else:
+            remaining_dwell_s = 0.0
+            ready = (rec_c2 != cur_c2_mode and dwell_elapsed_s >= self.BASE_DOWNSHIFT_DWELL_S)
+
+        grade = ("clean" if target_tier == 2 else "marginal" if target_tier == 1 else "rough")
+        vox_warn = None
+        if self.tone_margin_ema is not None and self.tone_margin_ema < 25.0:
+            vox_warn = f"Low VOX tone margin ({self.tone_margin_ema:.0f} ms surviving) — calibrate VOX or raise tone length."
+
+        needs_change = (rec_voice != cur_voice_modem or rec_c2 != cur_c2_mode)
+        return {
+            "grade": grade,
+            "samples": self.samples,
+            "delivery_pct": round(self.delivery_ema * 100.0, 1),
+            "fast_delivery_pct": round(self.fast_delivery_ema * 100.0, 1),
+            "snr_ema_db": round(self.snr_ema, 1) if self.snr_ema is not None else None,
+            "snr_jitter_db": round(self.snr_dev_ema, 1),
+            "mode_inertia_pct": round(inertia * 100.0, 0),
+            "tenure_stickiness_pct": round(inertia * 100.0, 0),
+            "switching_incentive_score": switching_incentive_score,
+            "downshift_urgency": downshift_urgency,
+            "upshift_incentive": upshift_incentive,
+            "tone_margin_ms": round(self.tone_margin_ema, 0) if self.tone_margin_ema is not None else None,
+            "unconfirmed_streak": self.unconfirmed_streak,
+            "recommended": {
+                "voice_modem": rec_voice,
+                "voice_label": M.VOICE_LABELS.get(rec_voice, (rec_voice, ""))[0],
+                "mode": rec_c2,
+                "data_cap": rec_data_cap,
+            },
+            "needs_change": needs_change,
+            "ready_to_apply": bool(needs_change and ready),
+            "remaining_dwell_s": round(remaining_dwell_s, 0),
+            "cooldown_s": round(remaining_dwell_s, 0),
+            "why": why,
+            "vox_warning": vox_warn,
+        }
+
+    def mark_applied(self):
+        self.last_switch_at = time.time()
+        self.dwell_samples = 0
+        self.tenure_streak = 0
