@@ -55,6 +55,48 @@ def describe(blob: bytes) -> str:
     return f"{who:8s} {name:6s} msg{msg:04x}"
 
 
+def ensure_local_hub(host: str = "127.0.0.1", port: int = 45000) -> bool:
+    """Start an in-process background UDP hub if the port is not already bound.
+    Returns True if an embedded hub was started, False if one was already running."""
+    import threading
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, opt, 8 << 20)
+        except OSError:
+            pass
+    try:
+        # Do NOT set SO_REUSEADDR here: we want bind() to fail with EADDRINUSE
+        # if an external hub.py or another station's embedded hub already owns the port.
+        sock.bind((host, port))
+    except OSError:
+        sock.close()
+        return False
+
+    def _serve():
+        peers: dict[tuple, float] = {}
+        while True:
+            try:
+                blob, src = sock.recvfrom(RECV_MAX)
+            except OSError:
+                break
+            now = time.time()
+            peers[src] = now
+            for p in [p for p, t in peers.items() if now - t > PEER_TIMEOUT]:
+                del peers[p]
+            if blob.startswith(b"\x00"):
+                continue
+            for p in list(peers):
+                if p != src:
+                    try:
+                        sock.sendto(blob, p)
+                    except OSError:
+                        pass
+
+    threading.Thread(target=_serve, name="crowcall-auto-hub", daemon=True).start()
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=45000)
