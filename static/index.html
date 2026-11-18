@@ -4,23 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>crowcall</title>
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script src="socket.io/socket.io.js"></script>
 <style>
-  /* ------------------------------------------------------------------
-     Three type registers, deliberately. An all-monospace panel reads as
-     undifferentiated noise, which is the opposite of useful when you are
-     scanning for one number.
-
-       --display  serif, for headings. Radio log books and equipment
-                  nameplates were set in serif; it also gives the strongest
-                  possible contrast against the data.
-       --mono     anything you compare column to column: bitrates, chunk
-                  counts, timestamps, callsigns. Alignment is the point.
-       --sans     prose. Message bodies and anything read as a sentence.
-
-     No webfonts anywhere. A tool built for the absence of infrastructure
-     should not need a CDN to render.
-     ------------------------------------------------------------------ */
   :root{
     --chassis:#161e27; --panel:#1e2933; --raised:#26323e;
     --patina:#6f9a8d; --brass:#c08a3e; --phosphor:#ffb547;
@@ -30,249 +15,199 @@
     --sans:system-ui,-apple-system,"Segoe UI",Roboto,"DejaVu Sans",sans-serif;
     --mono:ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
   }
+  body[data-theme="daylight"]{
+    --chassis:#f2efe9; --panel:#ffffff; --raised:#e4dfd5;
+    --patina:#1f6f5c; --brass:#8c5a18; --phosphor:#b85d00;
+    --alarm:#c02f1d; --ink:#182026; --dim:#5c6b73;
+  }
+  body[data-theme="night"]{
+    --chassis:#090202; --panel:#120404; --raised:#1f0808;
+    --patina:#b83227; --brass:#9e2a20; --phosphor:#ff4733;
+    --alarm:#ff1a1a; --ink:#e85d4a; --dim:#8f342a;
+  }
   *{box-sizing:border-box}
   body{margin:0;background:var(--chassis);color:var(--ink);
-       font-family:var(--sans);font-size:15px;line-height:1.55}
-  /* faint ruling, like a paper signals log under the panels. 30px must stay
-     in step with the body line-height or the lines fight the text. */
+       font-family:var(--sans);font-size:15px;line-height:1.5}
   body::before{content:"";position:fixed;inset:0;pointer-events:none;
     background:repeating-linear-gradient(transparent 0 29px,
-      rgba(111,154,141,.045) 29px 30px);z-index:0}
-  .wrap{position:relative;z-index:1;max-width:1520px;margin:0 auto;
-        padding:22px 18px 60px}
+      rgba(111,154,141,.04) 29px 30px);z-index:0}
+  .wrap{position:relative;z-index:1;max-width:1360px;margin:0 auto;
+        padding:14px 16px 48px}
 
-  header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;
-    border-bottom:1px solid var(--raised);padding-bottom:13px;margin-bottom:22px}
-  h1{font-family:var(--display);font-size:27px;font-weight:600;margin:0;
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    border-bottom:1px solid var(--raised);padding-bottom:10px;margin-bottom:12px}
+  h1{font-family:var(--display);font-size:23px;font-weight:600;margin:0;
      letter-spacing:.04em;color:var(--patina)}
-  .call{font-family:var(--mono);font-size:29px;color:var(--phosphor);
-        letter-spacing:.05em}
-  .spec{font-family:var(--mono);font-size:12px;color:var(--dim);
-        margin-left:auto;text-align:right;letter-spacing:.03em;line-height:1.7}
+  .call{font-family:var(--mono);font-size:22px;color:var(--phosphor);
+        letter-spacing:.05em;cursor:pointer;border-bottom:1px dashed transparent}
+  .call:hover{border-bottom-color:var(--phosphor)}
+  .pill{font-family:var(--mono);font-size:12px;padding:4px 9px;border-radius:3px;
+        background:var(--panel);border:1px solid var(--raised);color:var(--ink)}
+  .pill.warn{border-color:var(--alarm);color:#fff;background:var(--alarm);cursor:pointer}
+  .hdr-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .spec{font-family:var(--mono);font-size:11px;color:var(--dim);text-align:right;line-height:1.4}
 
-  /* Three columns: compose on the left, traffic in the middle where the eye
-     lands, instruments on the right. The middle column is the only one that
-     grows -- minmax(0,1fr) rather than 1fr so a long string cannot widen it. */
-  .cols{display:grid;grid-template-columns:330px minmax(0,1fr) 320px;
-        gap:20px;align-items:start}
-  .cols > *{min-width:0}
-  @media(max-width:1240px){
-    .cols{grid-template-columns:320px minmax(0,1fr)}
-    .cols > .instr{grid-column:1 / -1;display:grid;
-      grid-template-columns:1fr 1fr;gap:20px;align-items:start}
+  .peers{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px;
+         font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .peer{padding:3px 8px;border-radius:2px;background:var(--panel);
+        border:1px solid var(--raised);color:var(--ink)}
+  .peer.stale{opacity:.5}
+
+  .layout{display:grid;grid-template-columns:360px minmax(0,1fr);gap:18px;align-items:start}
+  .layout.drawer-open{grid-template-columns:340px minmax(0,1fr) 340px}
+  .layout > *{min-width:0}
+  @media(max-width:1160px){
+    .layout.drawer-open{grid-template-columns:320px minmax(0,1fr)}
+    .drawer{grid-column:1 / -1}
   }
   @media(max-width:820px){
-    .cols{grid-template-columns:minmax(0,1fr)}
-    .cols > .instr{grid-template-columns:minmax(0,1fr)}
+    .layout,.layout.drawer-open{grid-template-columns:minmax(0,1fr)}
+    .spec{text-align:left;margin-left:0}
   }
 
   .card{background:var(--panel);border:1px solid var(--raised);
-        border-radius:3px;padding:16px;margin-bottom:18px;
-        min-width:0;overflow:hidden}
-  .instr .card:last-child{margin-bottom:0}
-  .lab{font-family:var(--display);font-size:15px;font-weight:600;
-       letter-spacing:.03em;color:var(--brass);margin:0 0 12px}
+        border-radius:3px;padding:14px;margin-bottom:14px;min-width:0;overflow:hidden}
+  .lab{font-family:var(--display);font-size:14px;font-weight:600;
+       letter-spacing:.03em;color:var(--brass);margin:0 0 10px}
 
-  button{font-family:var(--mono);font-size:13px;letter-spacing:.09em;
+  button{font-family:var(--mono);font-size:12px;letter-spacing:.07em;
     text-transform:uppercase;background:var(--raised);color:var(--ink);
-    border:1px solid #33424f;border-radius:2px;padding:9px 14px;cursor:pointer}
+    border:1px solid #33424f;border-radius:2px;padding:7px 11px;cursor:pointer}
   button:hover:not(:disabled){border-color:var(--patina);color:var(--phosphor)}
   button:disabled{opacity:.4;cursor:default}
-  button:focus-visible{outline:2px solid var(--phosphor);outline-offset:2px}
+  button.danger{border-color:var(--alarm);color:var(--alarm)}
+  button.primary{border-color:var(--patina);color:var(--phosphor)}
 
-  #rec{width:100%;padding:20px;font-size:15px;letter-spacing:.14em;
-       border-color:var(--patina)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .quickrow{display:flex;gap:8px;margin-bottom:10px}
+  .quickrow button{flex:1;font-size:11px;padding:6px 8px}
+
+  #rec{flex:1;padding:15px 12px;font-size:14px;letter-spacing:.10em;
+       border-color:var(--patina);touch-action:none;user-select:none;-webkit-user-select:none}
   #rec.on{background:var(--alarm);border-color:var(--alarm);color:#fff;
           animation:pulse 1.1s ease-in-out infinite}
-  @keyframes pulse{50%{opacity:.62}}
-  @media(prefers-reduced-motion:reduce){#rec.on{animation:none}}
-  .meter{height:3px;background:var(--raised);margin-top:9px;overflow:hidden}
-  .meter i{display:block;height:100%;width:0;background:var(--phosphor);
-           transition:width .08s linear}
+  @keyframes pulse{50%{opacity:.65}}
+  .meter{height:4px;background:var(--raised);margin-top:8px;overflow:hidden;border-radius:2px}
+  .meter i{display:block;height:100%;width:0;background:var(--phosphor);transition:width .08s linear}
 
-  /* knob: fixed label column, elastic track, fixed value column. min-width:0
-     on the track is load-bearing -- flex items default to min-width:auto and
-     refuse to shrink below their content, which pushes them out of the card. */
-  .knob{display:flex;align-items:center;gap:10px;margin:11px 0;
+  textarea,input[type=text],input[type=password],select{
+    width:100%;background:var(--chassis);color:var(--ink);
+    border:1px solid var(--raised);border-radius:2px;padding:8px 10px;
+    font-family:var(--sans);font-size:14px}
+  textarea{resize:vertical;min-height:68px}
+  select{font-family:var(--mono);font-size:12px;padding:6px 8px}
+
+  .filepick{display:flex;align-items:center;gap:8px;margin:8px 0}
+  .filepick input[type=file]{display:none}
+  .filepick label{font-family:var(--mono);font-size:11px;padding:5px 10px;
+    background:var(--raised);border:1px solid #33424f;border-radius:2px;cursor:pointer}
+  .filepick .fname{font-family:var(--mono);font-size:12px;color:var(--dim);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+
+  .hint{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:6px;line-height:1.45}
+  .warn{color:var(--phosphor)}
+  .knob{display:flex;align-items:center;gap:8px;margin:8px 0;
         font-family:var(--mono);font-size:12px;color:var(--dim)}
-  .knob span:first-child{flex:0 0 92px;letter-spacing:.05em}
+  .knob span:first-child{flex:0 0 98px}
   .knob input[type=range]{flex:1;min-width:0;accent-color:var(--patina)}
-  .knob b{flex:0 0 58px;text-align:right;color:var(--ink);font-weight:500}
-  .toggle{display:flex;align-items:center;gap:9px;font-family:var(--sans);
-    font-size:13px;color:var(--dim);margin:9px 0;cursor:pointer;line-height:1.4}
-  .toggle input{accent-color:var(--patina);flex:0 0 auto}
+  .knob b{flex:0 0 56px;text-align:right;color:var(--ink);font-weight:500}
+  label.toggle{display:flex;align-items:center;gap:8px;margin:7px 0;font-size:13px;cursor:pointer}
+  label.toggle input{accent-color:var(--patina)}
 
-  .field{margin:14px 0 4px}
-  .field label{display:block;font-family:var(--mono);font-size:12px;
-    color:var(--dim);letter-spacing:.05em;margin-bottom:6px}
-  select{display:block;width:100%;min-width:0;font-family:var(--mono);
-    font-size:12px;background:var(--raised);color:var(--ink);
-    border:1px solid #33424f;border-radius:2px;padding:6px 7px}
-  select:focus-visible{outline:2px solid var(--phosphor);outline-offset:1px}
-  .hint{font-family:var(--mono);font-size:11px;color:var(--dim);
-    letter-spacing:.03em;margin-top:6px;line-height:1.65}
-  .hint .warn{color:var(--brass)}
-  .cliff{font-family:var(--mono);font-size:11px;color:var(--dim);
-    margin:-4px 0 9px 102px;letter-spacing:.03em}
-  .cliff b{color:var(--alarm);font-weight:500}
+  .vu{position:relative;height:12px;background:var(--chassis);border:1px solid var(--raised);
+      border-radius:2px;overflow:hidden;margin:6px 0}
+  .vu i{display:block;height:100%;width:0;background:var(--patina);transition:width .1s}
+  .vu i.hot{background:var(--phosphor)}
+  .vu i.clip{background:var(--alarm)}
 
-  textarea{width:100%;min-width:0;background:#141c24;color:var(--ink);
-    border:1px solid #2f3f4b;border-radius:2px;padding:10px;resize:vertical;
-    font-family:var(--sans);font-size:14.5px;line-height:1.55;min-height:72px}
-  textarea:focus-visible{outline:2px solid var(--patina);outline-offset:0}
-  .row2{display:flex;gap:10px;align-items:center;margin-top:10px}
-  .row2 button{flex:0 0 auto}
-  .cost{flex:1;min-width:0;font-family:var(--mono);font-size:11px;
-    color:var(--dim);letter-spacing:.03em;line-height:1.5}
-  .cost b{color:var(--phosphor);font-weight:500}
-  .cost .slow{color:var(--alarm)}
-  .filepick{display:flex;align-items:center;gap:10px;margin-top:4px}
-  .filepick label{font-family:var(--mono);font-size:13px;letter-spacing:.09em;
-    text-transform:uppercase;background:var(--raised);color:var(--ink);
-    border:1px solid #33424f;border-radius:2px;padding:9px 14px;cursor:pointer}
-  .filepick label:hover{border-color:var(--patina);color:var(--phosphor)}
-  .filepick input{position:absolute;width:1px;height:1px;opacity:0}
-  .filepick input:focus-visible + label{outline:2px solid var(--phosphor)}
-  .filepick span{font-family:var(--mono);font-size:11px;color:var(--dim);
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-  /* THE SIGNATURE ELEMENT: punched paper tape, one cell per chunk.
-       dark        never arrived
-       amber       arrived first time
-       hatched     recovered by a repair round
-       red outline missing at finalisation
-     flex-basis 10px with flex-grow means it fills the row for a short
-     message and scrolls for a long one, rather than becoming unreadably thin. */
-  .tape{display:flex;gap:2px;margin:12px 0 7px;padding:6px 5px;
-    background:#121920;border-top:1px solid #2c3945;
-    border-bottom:1px solid #2c3945;overflow-x:auto}
-  .tape i{flex:1 0 10px;height:29px;border-radius:1px;background:#1b242d;
-    box-shadow:inset 0 0 0 1px #232f39}
-  .tape i.ok{background:var(--phosphor);box-shadow:0 0 5px rgba(255,181,71,.4)}
-  .tape i.repaired{background:var(--patina);
-    background-image:repeating-linear-gradient(45deg,
-      rgba(0,0,0,.32) 0 2px,transparent 2px 4px)}
-  .tape i.lost{background:#1b242d;box-shadow:inset 0 0 0 1px var(--alarm)}
+  .msg{border-bottom:1px solid var(--raised);padding:12px 0}
+  .msg:last-child{border-bottom:0}
+  .msg .top{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .who{font-family:var(--mono);font-weight:600;color:var(--phosphor)}
+  .rate{font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:2px;
+        background:var(--raised);color:var(--patina)}
+  .rate.other{color:var(--phosphor)}
+  .meta{font-family:var(--mono);font-size:11px;color:var(--dim);margin-left:auto}
+  .tape{display:flex;gap:2px;flex-wrap:wrap;margin:6px 0}
+  .tape i{width:14px;height:8px;border-radius:1px;background:var(--raised);display:inline-block}
+  .tape i.ok{background:var(--brass)}
   .tape i.tx{background:#40525f}
-
-  .msg{border-left:2px solid var(--raised);padding:12px 0 12px 15px;
-       margin-bottom:16px}
-  .msg.degraded{border-left-color:var(--alarm)}
-  .msg.clean{border-left-color:var(--patina)}
-  .msg .top{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap;
-    font-family:var(--mono);font-size:12px;color:var(--dim);letter-spacing:.04em}
-  .msg .who{font-family:var(--mono);font-size:17px;color:var(--phosphor);
-    letter-spacing:.09em}
-  .msg .note{font-family:var(--sans);font-size:13.5px;color:var(--dim);
-    margin-top:3px}
-  .msg .note b{color:var(--alarm);font-weight:600}
-  .rate{font-family:var(--mono);font-size:11px;letter-spacing:.07em;
-    padding:2px 7px;border:1px solid var(--brass);color:var(--brass);
-    border-radius:2px;white-space:nowrap;cursor:help}
-  .rate.other{border-color:var(--phosphor);color:var(--phosphor);
-    background:rgba(255,181,71,.08)}
-  audio{width:100%;margin-top:10px;height:34px;
-    filter:invert(.88) hue-rotate(180deg)}
-
-  .body{margin-top:10px;padding:11px 13px;background:#141c24;
-    border-left:2px solid var(--patina);font-family:var(--sans);
-    font-size:14.5px;line-height:1.6;white-space:pre-wrap;
-    word-break:break-word;max-height:300px;overflow:auto}
-  .body.broken{border-left-color:var(--alarm)}
-  .filecard{display:flex;align-items:center;gap:11px;margin-top:10px;
-    padding:11px 13px;background:#141c24;border-left:2px solid var(--patina)}
-  .filecard.broken{border-left-color:var(--alarm)}
-  .filecard .fname{font-family:var(--mono);font-size:13px;color:var(--ink);
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .filecard .fmeta{font-family:var(--mono);font-size:11px;color:var(--dim);
-    margin-left:auto;white-space:nowrap}
-  .filecard a{font-family:var(--mono);font-size:11px;letter-spacing:.07em;
-    text-transform:uppercase;text-decoration:none;color:var(--patina);
-    border:1px solid #2f3f4b;border-radius:2px;padding:4px 9px}
-  .filecard a:hover{border-color:var(--patina);color:var(--phosphor)}
-
-  .saved{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:10px}
-  .saved a{font-family:var(--mono);font-size:11px;letter-spacing:.07em;
-    text-transform:uppercase;text-decoration:none;color:var(--patina);
-    border:1px solid #2f3f4b;border-radius:2px;padding:4px 8px}
-  .saved a:hover{border-color:var(--patina);color:var(--phosphor)}
-  .saved a:focus-visible{outline:2px solid var(--phosphor);outline-offset:1px}
-  .saved em{font-family:var(--mono);font-size:11px;color:var(--dim);
-    font-style:normal;letter-spacing:.03em}
-
-  /* Ether: a normal top-to-bottom log. It fills downward, then scrolls inside
-     its own panel instead of overlapping or moving the page. */
-  #ether{font-family:var(--mono);font-size:12px;height:340px;overflow-y:scroll;
-    overflow-x:hidden;display:flex;flex-direction:column;line-height:1.6;
-    overscroll-behavior:contain;scrollbar-gutter:stable}
-  #ether div{padding:1px 0;color:var(--dim);white-space:nowrap;
-    overflow:hidden;text-overflow:ellipsis}
-  #ether .rx{color:var(--patina)} #ether .tx{color:var(--phosphor)}
-  #ether .drop{color:var(--alarm)} #ether .sys{color:var(--brass)}
-
-  .prompt{background:var(--raised);border:1px solid var(--brass);
-    border-radius:3px;padding:15px;margin-bottom:16px}
-  .prompt p{margin:0 0 12px;font-size:14.5px}
-  .prompt .row{display:flex;gap:9px}
-  .empty{font-family:var(--mono);font-size:11.5px;color:var(--dim);
-    letter-spacing:.03em;padding:7px 0;line-height:1.6}
-  .fade{color:var(--alarm);font-family:var(--mono);font-size:12px;
-    letter-spacing:.09em;text-transform:uppercase}
-  body.embed .wrap{padding:12px 12px 24px}
-  body.embed header{padding-bottom:9px;margin-bottom:14px}
-  body.embed h1{font-size:21px}
-  body.embed .call{font-size:22px}
-  body.embed .cols{gap:14px}
-  body.embed .card{padding:12px;margin-bottom:12px}
-  #samplebtn{width:100%;margin-top:8px;border-color:var(--brass);color:var(--phosphor)}
-  #samplebtn:hover:not(:disabled){border-color:var(--phosphor);background:#2d3b47}
+  .tape i.repaired{background:var(--patina)}
+  .tape i.lost{background:transparent;border:1px solid var(--alarm)}
+  .note{font-size:13px;color:var(--dim);margin-top:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .body{white-space:pre-wrap;background:var(--chassis);padding:9px 11px;border-radius:2px;
+        margin-top:6px;border:1px solid var(--raised);font-size:14px}
+  .body.broken{border-color:var(--alarm)}
+  .filecard{display:flex;gap:10px;align-items:center;background:var(--chassis);
+    padding:8px 10px;border-radius:2px;margin-top:6px;border:1px solid var(--raised);font-family:var(--mono);font-size:12px}
+  .saved{margin-top:6px;font-family:var(--mono);font-size:11px;color:var(--dim);display:flex;gap:8px;flex-wrap:wrap}
+  .saved a{color:var(--patina);text-decoration:none}
+  .saved a:hover{text-decoration:underline}
+  audio{width:100%;margin-top:6px;height:34px}
+  .prompt{background:var(--chassis);border:1px solid var(--phosphor);padding:10px;border-radius:3px;margin-bottom:10px}
+  #ether{font-family:var(--mono);font-size:11px;max-height:200px;overflow-y:auto;
+         background:var(--chassis);padding:8px;border-radius:2px;border:1px solid var(--raised)}
+  #ether .tx{color:var(--phosphor)} #ether .rx{color:var(--patina)}
+  #ether .drop{color:var(--alarm)} #ether .sys{color:var(--dim)}
+  .empty{color:var(--dim);font-style:italic;font-size:13px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>crowcall</h1>
-    <div class="call" id="mycall">----</div>
-    <div class="spec" id="spec"></div>
+    <span class="call" id="mycall" title="Click to change your station callsign/name">ANON</span>
+    <span class="pill" id="healthpill">Link Ready</span>
+    <button class="pill warn" id="simwarn" hidden>SIMULATOR LOSS ACTIVE — RESET</button>
+    <span class="pill warn" id="conn" hidden>DISCONNECTED</span>
+    <div class="hdr-right">
+      <button id="theme">Theme: Dusk</button>
+      <button id="toggledrawer">Radio / Sim</button>
+      <div class="spec" id="spec"></div>
+    </div>
   </header>
 
-  <div class="cols">
+  <div class="peers" id="peers"><span class="empty">Listening for stations...</span></div>
 
-    <!-- LEFT: everything you originate. Voice, text, files. -->
-    <div class="compose">
+  <div class="layout" id="layout">
+    <div class="compose" id="compose">
       <div class="card">
-        <p class="lab">Transmit voice</p>
-        <button id="rec">Hold to record</button>
-        <button id="samplebtn" hidden>Send sample voice clip</button>
+        <p class="lab">Voice &amp; Tactical Check-In</p>
+        <div class="quickrow">
+          <button id="btnok" class="primary">Check-In: OK</button>
+          <button id="btnsos" class="danger">! Need Help</button>
+        </div>
+        <div class="row">
+          <button id="rec">Hold or Tap to Record</button>
+          <button id="reccancel" class="danger" hidden>Cancel</button>
+        </div>
+        <button id="samplebtn" hidden style="width:100%;margin-top:8px;border-color:var(--brass);color:var(--phosphor)">Send sample voice clip</button>
         <div class="meter"><i id="lvl"></i></div>
-        <div class="empty" id="txnote">Press and hold, or press space.</div>
-      </div>
-
-      <div class="card">
-        <p class="lab">Send text</p>
-        <textarea id="txt" placeholder="Type a message."></textarea>
-        <div class="row2">
-          <button id="sendtxt" disabled>Send</button>
-          <div class="cost" id="txtcost"></div>
+        <div class="filepick" id="mobrec" hidden>
+          <input type="file" id="mobaudio" accept="audio/*" capture="microphone">
+          <label for="mobaudio">Record via Phone Mic</label>
         </div>
+        <div class="hint" id="txnote">Hold for push-to-talk, or quick tap to lock recording.</div>
       </div>
 
       <div class="card">
-        <p class="lab">Send a file</p>
-        <div class="filepick">
+        <p class="lab">Send Text or File</p>
+        <textarea id="txt" placeholder="Type message (Ctrl+Enter to send)..."></textarea>
+        <div class="row" style="margin-top:8px">
+          <button id="sendtxt" disabled>Send Text</button>
+          <span class="hint" id="txtcost" style="margin:0"></span>
+        </div>
+        <div class="filepick" style="margin-top:10px">
           <input type="file" id="fileinput">
-          <label for="fileinput">Choose</label>
-          <span id="filename">No file chosen</span>
+          <label for="fileinput">Attach File</label>
+          <span class="fname" id="filename">No file chosen</span>
+          <button id="sendfile" disabled>Send File</button>
         </div>
-        <div class="row2">
-          <button id="sendfile" disabled>Send</button>
-          <div class="cost" id="filecost"></div>
-        </div>
+        <div class="hint" id="filecost"></div>
       </div>
     </div>
 
-    <!-- MIDDLE: the traffic log, where the eye lands. -->
-    <div class="main">
+    <div class="traffic">
       <div id="prompts"></div>
       <div class="card">
         <p class="lab">Traffic</p>
@@ -280,54 +215,62 @@
       </div>
     </div>
 
-    <!-- RIGHT: instruments. Things you watch and adjust, not things you
-         compose. Collapses to a two-across strip under 1240px. -->
-    <div class="instr">
-      <div class="card">
-        <p class="lab">Channel conditions</p>
-        <div class="knob" id="snrknob" hidden><span>Signal</span>
-          <input type="range" id="snr" min="0" max="30" step="1" value="20">
-          <b id="snrv">20 dB</b></div>
-        <div class="cliff" id="cliff" hidden></div>
-        <div class="knob" id="lossknob"><span>Static loss</span>
-          <input type="range" id="loss" min="0" max="60" step="1" value="0">
-          <b id="lossv">0%</b></div>
-        <div class="knob"><span>Fade chance</span>
-          <input type="range" id="fp" min="0" max="30" step="1" value="0">
-          <b id="fpv">0%</b></div>
-        <div class="knob"><span>Fade length</span>
-          <input type="range" id="fl" min="500" max="12000" step="500" value="3000">
-          <b id="flv">3.0s</b></div>
-        <label class="toggle"><input type="checkbox" id="auto" checked>
-          Answer repair requests automatically</label>
-        <label class="toggle"><input type="checkbox" id="pace" checked>
-          Pace transmission at radio speed</label>
-        <label class="toggle"><input type="checkbox" id="vad" checked>
-          Strip silence before sending</label>
-        <label class="toggle" id="savewrap"><input type="checkbox" id="save" checked>
-          Save messages to disk</label>
-        <label class="toggle" id="savemodemwrap"><input type="checkbox" id="savemodem">
-          Also save per-burst modem audio</label>
-        <div class="hint" id="arch"></div>
-        <div class="field">
-          <label for="voice">Voice mode</label>
-          <select id="voice"></select>
-          <div class="hint" id="voicehint"></div>
+    <div class="drawer" id="drawer" hidden>
+      <div class="card" id="radiocard" hidden>
+        <p class="lab">Radio Hardware &amp; VOX</p>
+        <div class="vu"><i id="vubar"></i></div>
+        <div class="hint" id="vustatus">RX Audio: idle</div>
+        <div class="knob"><span>Audio Device</span><select id="audiodev"></select></div>
+        <div class="row" style="margin:8px 0">
+          <button id="voxcal" class="primary">Calibrate VOX &amp; Level</button>
+          <button id="audiotest">Tune</button>
         </div>
-        <div class="field">
-          <label for="mode">Codec2 rate</label>
-          <select id="mode"></select>
-          <div class="hint" id="rt"></div>
+        <div class="knob"><span>VOX Tone ms</span><input type="range" id="tonems" min="40" max="500" step="10" value="120"><b id="tonemsv">120ms</b></div>
+        <div class="knob"><span>VOX Slack</span><input type="range" id="voxslack" min="20" max="250" step="10" value="60"><b id="voxslackv">60ms</b></div>
+        <div class="knob"><span>TX Gain</span><input type="range" id="txgain" min="0.1" max="2.0" step="0.05" value="1.0"><b id="txgainv">1.00x</b></div>
+        <div class="filepick">
+          <input type="file" id="rxwavinput" accept="audio/*">
+          <label for="rxwavinput">Decode Recorded .WAV</label>
         </div>
-        <div class="empty" id="fadestate"></div>
       </div>
 
       <div class="card">
-        <p class="lab">Ether</p>
-        <div id="ether"></div>
+        <p class="lab">Link Health &amp; Roles</p>
+        <div class="hint" id="healthdetail">Collecting link telemetry...</div>
+        <div class="row" style="margin:8px 0">
+          <button id="applyadapt" disabled>Apply Suggested Mode</button>
+        </div>
+        <label class="toggle"><input type="checkbox" id="autoadapt" checked> Auto-Adapt Mode (Suggest &rarr; Do)</label>
+        <label class="toggle"><input type="checkbox" id="autoretry" checked> Auto-Retry Unconfirmed Messages</label>
+        <label class="toggle"><input type="checkbox" id="autoplay" checked> Auto-Play Incoming Voice</label>
+        <label class="toggle"><input type="checkbox" id="repeater"> Simplex Repeater Mode</label>
+        <div class="knob"><span>Channel Key</span><input type="password" id="chkey" placeholder="Optional passphrase"></div>
+      </div>
+
+      <div class="card">
+        <details id="advdetails">
+          <summary class="lab" style="cursor:pointer;margin-bottom:8px">Advanced &amp; Channel Simulator</summary>
+          <div id="lossknob" class="knob"><span>Static loss</span><input type="range" id="loss" min="0" max="80" value="0"><b id="lossv">0%</b></div>
+          <div id="snrknob" class="knob"><span>Signal SNR</span><input type="range" id="snr" min="0" max="30" step="0.5" value="20"><b id="snrv">20 dB</b></div>
+          <div class="hint" id="cliff"></div>
+          <div class="knob"><span>Fade chance</span><input type="range" id="fp" min="0" max="50" value="0"><b id="fpv">0%</b></div>
+          <div class="knob"><span>Fade length</span><input type="range" id="fl" min="500" max="8000" step="250" value="3000"><b id="flv">3.0s</b></div>
+          <div id="fadestate"></div>
+          <div class="knob"><span>Voice mode</span><select id="voice"></select></div>
+          <div class="hint" id="voicehint"></div>
+          <div class="knob"><span>Codec2 rate</span><select id="mode"></select></div>
+          <div class="hint" id="rt"></div>
+          <label class="toggle"><input type="checkbox" id="auto" checked> Auto-repair missing chunks</label>
+          <label class="toggle"><input type="checkbox" id="pace" checked> Radio-speed pacing</label>
+          <label class="toggle"><input type="checkbox" id="vad" checked> Strip silence (VAD)</label>
+          <label class="toggle"><input type="checkbox" id="save" checked> Archive recordings</label>
+          <label class="toggle"><input type="checkbox" id="savemodem"> Save per-burst modem audio</label>
+          <div class="hint" id="arch"></div>
+          <p class="lab" style="margin-top:12px">Ether Log</p>
+          <div id="ether"></div>
+        </details>
       </div>
     </div>
-
   </div>
 </div>
 
@@ -337,9 +280,82 @@ const api = p => BASE + p;
 if (new URLSearchParams(location.search).get('embed') === '1') {
   document.body.classList.add('embed');
 }
-const sock = io({ path: BASE + '/socket.io' });
+const sock = typeof io !== 'undefined' ? io({ path: BASE + '/socket.io' }) : { on(){}, connected: false };
 const $ = id => document.getElementById(id);
-let CHUNK_S = 1.32, MY_MODE = null, seen = {};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let CHUNK_S = 1.32, MY_MODE = null, MY_CALL = 'ANON', TRANSPORT = 'hub';
+let seen = {}, peers = {}, unreadCount = 0;
+
+/* ---------- theme ---------- */
+const THEMES = ['dusk', 'daylight', 'night'];
+const THEME_NAMES = {dusk: 'Theme: Dusk', daylight: 'Theme: Daylight', night: 'Theme: Night Red'};
+function applyTheme(t){
+  const idx = THEMES.includes(t) ? t : 'dusk';
+  if (idx === 'dusk') document.body.removeAttribute('data-theme');
+  else document.body.dataset.theme = idx;
+  $('theme').textContent = THEME_NAMES[idx];
+  localStorage.setItem('crowcall_theme', idx);
+}
+applyTheme(localStorage.getItem('crowcall_theme') || 'dusk');
+$('theme').onclick = ()=>{
+  const cur = document.body.dataset.theme || 'dusk';
+  applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
+};
+
+$('toggledrawer').onclick = ()=>{
+  const open = $('drawer').hidden;
+  $('drawer').hidden = !open;
+  $('layout').classList.toggle('drawer-open', open);
+};
+
+/* ---------- connection & errors ---------- */
+sock.on('disconnect', ()=>{ $('conn').hidden = false; log('drop', 'Disconnected from station — reconnecting...'); });
+sock.on('connect', ()=>{ $('conn').hidden = true; refresh(); });
+sock.on('station_error', d=>{
+  log('drop', `ERROR (${d.where || 'station'}): ${d.error}`);
+  $('txnote').textContent = `Error (${d.where}): ${d.error}`;
+});
+sock.on('vox_calibrated', d=>{
+  log('sys', `VOX calibrated via ${d.from}: cut=${d.cut_ms}ms, tone=${d.tone_ms}ms, tx_gain=${d.tx_gain}x`);
+  $('txnote').textContent = `VOX calibrated: ${d.tone_ms}ms tone, TX gain ${d.tx_gain}x`;
+  refresh();
+});
+sock.on('mode_adapted', d=>{
+  log('sys', `[auto-adapt] ${d.from} -> ${d.to}: ${d.why}`);
+  refresh();
+});
+
+/* ---------- unread & chime ---------- */
+function arrivalChime(){
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = 880; g.gain.value = 0.05;
+    o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.06);
+  }catch(_){}
+}
+document.addEventListener('visibilitychange', ()=>{
+  if (!document.hidden){ unreadCount = 0; document.title = 'crowcall · ' + MY_CALL; }
+});
+
+/* ---------- peers ---------- */
+function notePeer(call, snr){
+  if (!call || call === MY_CALL) return;
+  peers[call] = {at: Date.now(), snr: snr ?? peers[call]?.snr ?? null};
+  renderPeers();
+}
+function renderPeers(){
+  const now = Date.now(), keys = Object.keys(peers);
+  if (!keys.length){ $('peers').innerHTML = '<span class="empty">Listening for stations...</span>'; return; }
+  $('peers').innerHTML = keys.sort().map(c=>{
+    const p = peers[c], age = Math.floor((now - p.at)/1000);
+    const stale = age > 180 ? ' stale' : '';
+    const snrTxt = p.snr != null ? ` · ${p.snr} dB` : '';
+    return `<span class="peer${stale}">${esc(c)}${snrTxt} · ${age}s ago</span>`;
+  }).join('');
+}
+setInterval(renderPeers, 5000);
 
 /* ---------- ether log ---------- */
 function log(cls, txt){
@@ -347,9 +363,6 @@ function log(cls, txt){
   const d = document.createElement('div');
   d.className = cls;
   d.textContent = new Date().toLocaleTimeString([], {hour12:false}) + '  ' + txt;
-  // Append in chronological order: every new event occupies its own row and
-  // pushes the older rows downward. When the fixed-height panel fills, the
-  // browser's own scrollbar handles the rest.
   box.appendChild(d);
   while (box.childElementCount > 120) box.firstChild.remove();
   box.scrollTop = box.scrollHeight;
@@ -371,229 +384,198 @@ function row(id){
   seen[id] = el;
   return el;
 }
+function rxRow(d){
+  const k = 'rx:' + (d.call || '') + ':' + d.msg_id;
+  if (seen[k]) return seen[k];
+  if (seen['rx'+d.msg_id]) return seen['rx'+d.msg_id];
+  const el = row(k);
+  seen['rx'+d.msg_id] = el;
+  return el;
+}
 function rate(el, r, aicodix){
   if (!r) return;
   const b = el.querySelector('.rate');
   b.hidden = false;
-  // the aicodix mode is what varies per message now, so it leads the badge
-  b.textContent = (aicodix || r.modem || '?') + ' \u00b7 ' + r.bps + ' bps';
+  b.textContent = (aicodix || r.modem || '?') + ' · ' + r.bps + ' bps';
   b.classList.toggle('other', MY_MODE && r.mode !== MY_MODE);
-  const pad = r.overhead_pct > 0
-    ? `\npadding : ${r.wire_bps} bps on the wire (${r.overhead_pct}% wasted)` : '';
-  b.title =
-      `aicodix : ${aicodix || r.modem || '?'}  (role "${r.modem}")\n`
-    + `burst   : ${r.usable} B usable in ${r.air_s}s\n`
-    + `codec2  : ${r.mode} \u2014 ${r.bytes_s} B/s, ${r.frame_bytes} B per frame\n`
-    + `chunk   : ${r.frames} frames = ${r.speech_s}s of speech\n`
-    + `on air  : ${r.realtime}x realtime${pad}`
-    + (MY_MODE && r.mode !== MY_MODE ? `\n\nyou are set to codec2 ${MY_MODE}` : '');
 }
-
 function payload(el, d){
   const box = el.querySelector('.payload');
   const broken = d.intact === false ? ' broken' : '';
   if (d.kind === 'text' && d.text !== undefined){
     box.innerHTML = `<div class="body${broken}"></div>`;
-    box.firstChild.textContent = d.text
-      + (d.truncated_display ? '\n\n[…truncated for display]' : '');
+    box.firstChild.textContent = d.text + (d.truncated_display ? '\n\n[...truncated]' : '');
   } else if (d.kind === 'file'){
-    box.innerHTML =
-      `<div class="filecard${broken}">`
-      + `<span class="fname"></span>`
-      + `<a href="${api('/api/payload/' + d.msg_id)}" download>save</a>`
-      + `<span class="fmeta">${human(d.bytes||0)}`
-      + (d.compression && d.compression !== 'none' ? ' · '+d.compression : '')
-      + `</span></div>`;
+    box.innerHTML = `<div class="filecard${broken}"><span class="fname"></span>
+      <a href="${api('/api/payload/' + encodeURIComponent(d.msg_id))}" download>save</a>
+      <span class="fmeta">${human(d.bytes||0)}</span></div>`;
     box.querySelector('.fname').textContent = d.filename || 'unnamed';
   } else if (d.kind === 'unknown'){
     box.innerHTML = `<div class="body broken"></div>`;
     box.firstChild.textContent = d.error || 'Unrecognised payload.';
   }
 }
-
 function saved(el, rec, kind, name){
-  // The three artifacts only exist for voice: wav/pcm are decoded speech and
-  // .c2 is codec2. A text or file message has none of them -- offering the
-  // links anyway would hand out 404s. Each kind gets what it actually has,
-  // and the zip is always the whole record including per-burst modem audio.
   if (!rec) return;
   const box = el.querySelector('.saved');
   const u = api('/api/recordings/' + encodeURIComponent(rec));
-  let links;
-  if (kind === 'text'){
-    links = `<a href="${u}/file/message.txt" download title="the message as UTF-8">txt</a>`;
-  } else if (kind === 'file'){
-    // the archive stores it under its own name inside file/, so link straight
-    // to it; fall back to meta.json when the name never arrived
-    links = name
-      ? `<a href="${u}/file/file/${encodeURIComponent(name)}" download `
-        + `title="the file as received">file</a>`
-      : `<a href="${u}/file/meta.json" title="mode, chunk map, loss, repair rounds">meta</a>`;
-  } else if (kind === 'unknown'){
-    links = `<a href="${u}/file/stream.raw" download title="reassembled bytes, holes and all">raw</a>`;
-  } else {
-    links =
-        `<a href="${u}/file/speech.wav" download title="8 kHz mono, what you hear">wav</a>`
-      + `<a href="${u}/file/speech.pcm" download title="raw s16le 8 kHz mono">pcm</a>`
-      + `<a href="${u}/file/message.c2" download title="codec2 bytes as carried on air">c2</a>`;
-  }
-  box.innerHTML = `<em>saved</em>` + links
-    + `<a href="${u}.zip" title="everything, including per-burst modem audio">zip</a>`;
+  let links = '';
+  if (kind === 'text') links = `<a href="${u}/file/message.txt" download>txt</a>`;
+  else if (kind === 'file') links = name ? `<a href="${u}/file/file/${encodeURIComponent(name)}" download>file</a>` : '';
+  else if (kind === 'unknown') links = `<a href="${u}/file/stream.raw" download>raw</a>`;
+  else links = `<a href="${u}/file/speech.wav" download>wav</a><a href="${u}/file/speech.pcm" download>pcm</a><a href="${u}/file/message.c2" download>c2</a>`;
+  box.innerHTML = `<em>saved</em>` + links + `<a href="${u}.zip">zip</a>`;
 }
-
 function tape(el, states){
   const t = el.querySelector('.tape');
-  if (t.childElementCount !== states.length){
-    t.innerHTML = states.map(()=>'<i></i>').join('');
-  }
+  if (t.childElementCount !== states.length) t.innerHTML = states.map(()=>'<i></i>').join('');
   [...t.children].forEach((c,i)=>{ c.className = states[i]; });
 }
 
-/* ---------- outbound ---------- */
+/* ---------- outbound events ---------- */
 sock.on('tx_start', d=>{
   const el = row('tx'+d.msg_id);
   el.querySelector('.who').textContent = 'YOU';
   if (d.kind && d.kind !== 'voice'){
-    el.querySelector('.meta').textContent =
-      `msg ${d.msg_id} · ${d.kind}`
-      + (d.name ? ` · ${d.name}` : '')
-      + ` · ${human(d.bytes)}`
-      + (d.compression !== 'none' ? ` → ${human(d.carried)} ${d.compression}` : '')
-      + ` · ${d.chunks} chunks · ${d.air_human} on air`;
+    el.querySelector('.meta').textContent = `msg ${d.msg_id} · ${d.kind} · ${d.chunks} chunks · ${d.air_human} on air`;
   } else {
     rate(el, d.rate, d.aicodix);
-    el.querySelector('.meta').textContent =
-      `msg ${d.msg_id} · ${d.chunks} chunks · ${d.speech_s}s speech · ${d.air_s}s on air`;
+    el.querySelector('.meta').textContent = `msg ${d.msg_id} · ${d.chunks} chunks · ${d.speech_s}s · ${d.air_s}s on air`;
   }
   tape(el, Array(d.chunks).fill('lost'));
-  el.querySelector('.note').textContent = 'Transmitting, interleaved order.';
-  log('tx', `TX msg ${d.msg_id}: ${d.chunks} chunks, ${d.air_s}s of air`);
+  el.querySelector('.note').innerHTML = `<span>Transmitting...</span> <button class="danger" onclick="abortTx('${esc(d.msg_id)}')">Stop TX</button>`;
+  log('tx', `TX msg ${d.msg_id}: ${d.chunks} chunks, ${d.air_s}s`);
 });
+window.abortTx = mid => fetch(api('/api/abort/')+encodeURIComponent(mid), {method:'POST'});
 sock.on('tx_chunk', d=>{
   const el = seen['tx'+d.msg_id]; if(!el) return;
   const c = el.querySelector('.tape').children[d.idx];
   if (c) c.className = d.repair ? 'repaired' : 'tx';
-  el.querySelector('.note').textContent =
-    `${d.repair?'Repairing':'Transmitting'} ${d.n}/${d.of} — chunk ${d.idx+1}`;
-  log('tx', `  chunk ${d.idx+1} out${d.repair?' (repair)':''}`);
+  const left = ((d.of - d.n) * (d.burst_s || 1.2)).toFixed(0);
+  el.querySelector('.note').innerHTML = `<span>${d.repair?'Repairing':'Transmitting'} ${d.n}/${d.of} (~${left}s left)</span> <button class="danger" onclick="abortTx('${esc(d.msg_id)}')">Stop TX</button>`;
+});
+sock.on('tx_aborted', d=>{
+  const el = seen['tx'+d.msg_id]; if(!el) return;
+  el.querySelector('.note').textContent = `Aborted after ${d.sent}/${d.of} bursts.`;
+  log('drop', `TX msg ${d.msg_id} aborted`);
+});
+sock.on('tx_retry', d=>{
+  const el = seen['tx'+d.msg_id]; if(!el) return;
+  el.querySelector('.note').textContent = `Auto-retrying (attempt ${d.attempt})...`;
+  log('tx', `Auto-retry msg ${d.msg_id} (attempt ${d.attempt})`);
 });
 sock.on('tx_done', d=>{
   const el = seen['tx'+d.msg_id]; if(!el) return;
+  el.querySelectorAll('.tape i.tx').forEach(c => { c.className = 'ok'; });
   el.classList.add('clean');
-  el.querySelector('.note').textContent = d.repair
-    ? 'Repair sent.' : 'Sent. Waiting to hear if anything was missed.';
+  el.querySelector('.note').innerHTML = (d.repair ? 'Repair sent.' : 'Waiting for peer confirmation...')
+    + ` <a href="${api('/api/tx_wav/' + encodeURIComponent(d.msg_id))}" download style="color:var(--patina);font-family:var(--mono);font-size:11px">tx.wav</a>`;
   saved(el, d.record, d.kind, d.name);
-  log('tx', `TX msg ${d.msg_id} complete`);
+});
+sock.on('tx_confirmed', d=>{
+  const el = seen['tx'+d.msg_id]; if(!el) return;
+  el.querySelector('.note').textContent = `Confirmed received by ${d.confirmed_by.join(', ')}.`;
+  log('rx', `TX msg ${d.msg_id} confirmed by ${d.confirmed_by.join(', ')}`);
 });
 
-/* ---------- inbound ---------- */
+/* ---------- inbound events ---------- */
 sock.on('rx_start', d=>{
-  const el = row('rx'+d.msg_id);
-  el.querySelector('.who').textContent = d.call;
-  if (d.kind && d.kind !== 'voice'){
-    el.querySelector('.meta').textContent =
-      `msg ${d.msg_id} · incoming ${d.kind} · ${d.chunks} chunks`;
-  } else {
-    rate(el, d.rate, d.aicodix);
-    el.querySelector('.meta').textContent =
-      `msg ${d.msg_id} · ${d.chunks} chunks · ${d.seconds}s`;
-  }
+  notePeer(d.call);
+  const el = rxRow(d);
+  el.querySelector('.who').textContent = d.call + (d.hops ? ` (${d.hops} hop)` : '');
+  el.querySelector('.meta').textContent = `msg ${d.msg_id} · incoming ${d.kind||'voice'} · ${d.chunks} chunks`;
   tape(el, Array(d.chunks).fill('lost'));
-  log('rx', `RX msg ${d.msg_id} from ${d.call}, ${d.kind || 'voice'}, `
-           + `${d.chunks} chunks`);
+  log('rx', `RX msg ${d.msg_id} from ${d.call}`);
 });
 sock.on('rx_progress', d=>{
-  const el = row('rx'+d.msg_id);
+  const el = rxRow(d);
   tape(el, d.strip);
   el.querySelector('.note').textContent = `${d.have} of ${d.of} chunks`;
 });
 sock.on('rx_done', d=>{
-  const el = row('rx'+d.msg_id);
+  notePeer(d.call);
+  if (document.hidden){ unreadCount++; document.title = `(${unreadCount}) crowcall · ${MY_CALL}`; }
+  const el = rxRow(d);
   tape(el, d.strip);
   el.classList.add(d.degraded ? 'degraded' : 'clean');
-
+  const retryBtn = d.lost > 0 ? ` <button onclick="retryRx('${esc(d.msg_id)}')">Ask for missing (${d.lost})</button>` : '';
   if (d.kind && d.kind !== 'voice'){
-    el.querySelector('.meta').textContent =
-      `msg ${d.msg_id} · ${d.kind} · ${d.of} chunks`;
+    arrivalChime();
+    el.querySelector('.meta').textContent = `msg ${d.msg_id} · ${d.kind} · ${d.of} chunks`;
     const n2 = el.querySelector('.note');
-    if (d.kind === 'unknown'){
-      n2.innerHTML = `<b>Prefix chunk never arrived.</b> Raw bytes saved.`;
-    } else if (d.intact){
-      n2.textContent = `Complete — ${human(d.bytes)} verified`
-        + (d.repaired ? `, ${d.repaired} chunk${d.repaired>1?'s':''} by repair.` : '.');
-    } else {
-      n2.innerHTML = `<b>Damaged</b> — ${d.lost} chunk${d.lost>1?'s':''} `
-        + `missing (${human(d.lost_bytes||0)}), checksum failed.`
-        + (d.error ? ` ${d.error}` : '');
-    }
+    if (d.kind === 'unknown') n2.innerHTML = `<b>Prefix chunk never arrived.</b>${retryBtn}`;
+    else if (d.intact) n2.textContent = `Complete — ${human(d.bytes)} verified.`;
+    else n2.innerHTML = `<b>Damaged</b> — ${d.lost} missing (${human(d.lost_bytes||0)}). ${esc(d.error||'')}${retryBtn}`;
     payload(el, d);
     saved(el, d.record, d.kind, d.filename);
-    log(d.intact ? 'rx' : 'drop',
-        `RX msg ${d.msg_id} ${d.kind} ${d.intact ? 'intact' : 'DAMAGED'}`);
     return;
   }
-
   rate(el, d.rate, d.aicodix);
-  el.querySelector('.meta').textContent =
-    `msg ${d.msg_id} · ${d.seconds}s · ${d.of} chunks`;
+  el.querySelector('.meta').textContent = `msg ${d.msg_id} · ${d.seconds}s · ${d.of} chunks`;
   const n = el.querySelector('.note');
-  if (d.lost) {
-    n.innerHTML = `Playing with <b>${d.lost} chunk${d.lost>1?'s':''} missing</b>` +
-      ` (${(d.lost*CHUNK_S).toFixed(1)}s of speech)` +
-      (d.repaired?` · ${d.repaired} recovered by repair`:'');
+  if (d.lost){
+    const lostSec = (d.lost_s !== undefined ? d.lost_s : d.lost * CHUNK_S).toFixed(1);
+    n.innerHTML = `<b>${d.lost} missing</b> (${lostSec}s)${retryBtn}`;
   } else {
-    n.textContent = d.repaired
-      ? `Complete — ${d.repaired} chunk${d.repaired>1?'s':''} recovered by repair.`
-      : 'Complete.';
+    n.textContent = d.repaired ? `Complete — ${d.repaired} repaired.` : 'Complete.';
   }
-  el.querySelector('.player').innerHTML =
-    `<audio controls preload="auto" src="${api('/api/audio/' + d.msg_id)}"></audio>`;
+  el.querySelector('.player').innerHTML = `<audio controls preload="auto" src="${api('/api/audio/' + encodeURIComponent(d.msg_id))}"></audio>`;
+  if ($('autoplay').checked && TRANSPORT !== 'soundcard'){
+    const aud = el.querySelector('audio');
+    if (aud) aud.play().catch(()=>{});
+  }
   saved(el, d.record, 'voice');
-  log(d.lost?'drop':'rx',
-      `RX msg ${d.msg_id} done — ${d.have}/${d.of}, ${d.loss_pct}% lost`);
 });
+window.retryRx = mid => fetch(api('/api/retry/')+encodeURIComponent(mid), {method:'POST'});
 sock.on('rx_error', d=> log('drop', `RX msg ${d.msg_id} decode failed: ${d.error}`));
 
-/* ---------- repair ---------- */
-sock.on('repair_asked', d=>
-  log('sys', `asked ${d.call||'sender'} to resend ${d.count}/${d.of} chunks (round ${d.round})`));
-sock.on('repair_result', d=>
-  log(d.agree?'sys':'drop', d.agree?'sender agreed to repair':'sender declined repair'));
-sock.on('repair_answer', d=>
-  log('sys', d.agree?`agreed to resend ${d.count} chunks`:'declined repair request'));
+/* ---------- repair & ether ---------- */
+sock.on('repair_asked', d=> log('sys', `asked for ${d.count}/${d.of} chunks (round ${d.round})`));
+sock.on('repair_result', d=> log(d.agree?'sys':'drop', d.agree?'sender agreed to repair':'sender declined repair'));
+sock.on('repair_answer', d=> log('sys', d.agree?`agreed to resend ${d.count} chunks`:'declined repair'));
 sock.on('ether', d=>{
-  if (d.dir === 'drop')
-    log('drop', `lost ${d.what}${d.what==='DAT'?' chunk '+(d.idx+1):''} — ${d.reason}`);
+  if (d.dir === 'rx') notePeer(d.call, d.snr);
+  if (d.dir === 'drop') log('drop', `lost ${d.what} — ${d.reason}`);
 });
-sock.on('station', d=> log('sys', `${d.call} on channel`));
-
+sock.on('station', d=>{ notePeer(d.call, d.snr); log('sys', `${d.call} on channel`); });
 sock.on('repair_request', d=>{
   const div = document.createElement('div');
   div.className = 'prompt';
-  div.innerHTML = `<p><strong>${d.call}</strong> missed
-    ${d.want.length} of ${d.of} chunks from msg ${d.msg_id}.
-    Resending costs about ${d.air_s}s of air.</p>
-    <div class="row"><button class="y">Resend</button>
-    <button class="n">Decline</button></div>`;
-  const answer = agree => {
-    fetch(api('/api/repair/'+encodeURIComponent(d.key)), {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({agree})
-    });
+  div.dataset.key = d.key;
+  div.innerHTML = `<p><strong>${esc(d.call)}</strong> missed ${d.want.length}/${d.of} chunks (msg ${esc(d.msg_id)}, ~${d.air_s}s).</p>
+    <div class="row"><button class="y">Resend</button><button class="n">Decline</button></div>`;
+  const ans = agree => {
+    fetch(api('/api/repair/')+encodeURIComponent(d.key), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agree})});
     div.remove();
   };
-  div.querySelector('.y').onclick = ()=>answer(true);
-  div.querySelector('.n').onclick = ()=>answer(false);
-  $('prompts').append(div);
+  div.querySelector('.y').onclick = ()=>ans(true);
+  div.querySelector('.n').onclick = ()=>ans(false);
+  const old = [...$('prompts').children].find(x => x.dataset.key === String(d.key));
+  if (old) old.replaceWith(div); else $('prompts').append(div);
 });
 
-/* ---------- recording ---------- */
+/* ---------- hybrid voice recording ---------- */
 let mr=null, chunks=[], stream=null, ac=null, an=null, raf=null;
+let recDownAt=0, recLatched=false, recCancelled=false;
+
+if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+  $('mobrec').hidden = false;
+}
+$('mobaudio').onchange = async ()=>{
+  const f = $('mobaudio').files[0]; if (!f) return;
+  $('txnote').textContent = 'Uploading phone recording...';
+  const fd = new FormData(); fd.append('audio', f, f.name || 'phone.m4a');
+  try{
+    const r = await fetch(api('/api/send'), {method:'POST', body:fd});
+    const j = await r.json();
+    $('txnote').textContent = j.error ? 'Failed: '+j.error : `${j.speech_s}s -> ${j.chunks} chunks, ${j.air_s}s on air.`;
+  }catch(e){ $('txnote').textContent = 'Send failed: ' + e.message; }
+  $('mobaudio').value = '';
+};
 
 async function mic(){
   if (stream) return stream;
-  stream = await navigator.mediaDevices.getUserMedia({audio:{
-    channelCount:1, echoCancellation:true, noiseSuppression:true}});
+  stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1, echoCancellation:true, noiseSuppression:true}});
   ac = new AudioContext(); an = ac.createAnalyser(); an.fftSize = 512;
   ac.createMediaStreamSource(stream).connect(an);
   return stream;
@@ -609,262 +591,309 @@ function level(){
 async function start(){
   if (mr && mr.state === 'recording') return;
   try { await mic(); }
-  catch(e){ $('txnote').textContent = 'Microphone blocked. Allow access and retry.'; return; }
-  chunks = [];
-  mr = new MediaRecorder(stream, {mimeType:
-    MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus' : 'audio/ogg'});
+  catch(e){ $('txnote').textContent = 'Microphone blocked.'; return; }
+  chunks = []; recCancelled = false;
+  mr = new MediaRecorder(stream, {mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/ogg'});
   mr.ondataavailable = e => e.data.size && chunks.push(e.data);
-  mr.onstop = send;
+  mr.onstop = ()=>{ if (!recCancelled) sendAudio(); };
   mr.start();
   $('rec').classList.add('on');
-  $('rec').textContent = 'Recording — release to send';
+  $('reccancel').hidden = false;
+  $('rec').textContent = 'Recording...';
   raf = requestAnimationFrame(level);
 }
-function stop(){
+function stop(sendIt=true){
+  recCancelled = !sendIt;
+  recLatched = false;
   if (mr && mr.state === 'recording') mr.stop();
   $('rec').classList.remove('on');
-  $('rec').textContent = 'Hold to record';
+  $('reccancel').hidden = true;
+  $('rec').textContent = 'Hold or Tap to Record';
   cancelAnimationFrame(raf); $('lvl').style.width = '0';
 }
-async function send(){
+async function sendAudio(){
   const blob = new Blob(chunks, {type: mr.mimeType});
   if (blob.size < 1200){ $('txnote').textContent = 'Too short — hold longer.'; return; }
-  $('txnote').textContent = 'Encoding…';
+  $('txnote').textContent = 'Encoding...';
   const fd = new FormData(); fd.append('audio', blob, 'r.webm');
   try {
     const r = await fetch(api('/api/send'), {method:'POST', body:fd});
     const j = await r.json();
-    if (j.error){ $('txnote').textContent = 'Failed: ' + j.error; }
-    else {
-      let t = `${j.speech_s}s of speech → ${j.chunks} chunks, `+
-              `${j.air_s}s on air (${j.realtime}x).`;
-      if (j.stripped_s > 0) t += ` Silence stripped: ${j.stripped_s}s.`;
-      $('txnote').textContent = t;
-    }
+    $('txnote').textContent = j.error ? 'Failed: '+j.error : `${j.speech_s}s -> ${j.chunks} chunks, ${j.air_s}s on air.`;
   } catch(e){ $('txnote').textContent = 'Send failed: ' + e.message; }
 }
 
 $('samplebtn').onclick = async ()=>{
   $('samplebtn').disabled = true;
-  $('txnote').textContent = 'Encoding sample voice…';
-  try {
+  $('txnote').textContent = 'Encoding sample voice...';
+  try{
     const r = await fetch(api('/api/sample'), {method:'POST'});
     const j = await r.json();
-    if (j.error){ $('txnote').textContent = 'Failed: ' + j.error; }
-    else {
-      $('txnote').textContent =
-        `${j.speech_s}s sample → ${j.chunks} chunks, ${j.air_s}s on air (${j.realtime}x).`;
-    }
-  } catch(e){ $('txnote').textContent = 'Sample failed: ' + e.message; }
+    $('txnote').textContent = j.error ? 'Failed: '+j.error : `${j.speech_s}s sample -> ${j.chunks} chunks, ${j.air_s}s on air.`;
+  }catch(e){ $('txnote').textContent = 'Sample failed: ' + e.message; }
   setTimeout(()=>{ $('samplebtn').disabled = false; }, 1200);
 };
+$('rec').addEventListener('contextmenu', e=>e.preventDefault());
+$('rec').addEventListener('pointerdown', e=>{
+  e.preventDefault();
+  if (recLatched){ stop(true); return; }
+  recDownAt = Date.now();
+  try{ e.target.setPointerCapture(e.pointerId); }catch(_){}
+  start();
+});
+$('rec').addEventListener('pointerup', ()=>{
+  if (!mr || mr.state !== 'recording') return;
+  if (Date.now() - recDownAt < 320){
+    recLatched = true;
+    $('rec').textContent = 'Recording Locked — Tap to Send';
+  } else {
+    stop(true);
+  }
+});
+$('rec').addEventListener('pointercancel', ()=>stop(false));
+$('reccancel').onclick = ()=>stop(false);
 
-$('rec').addEventListener('pointerdown', e=>{e.preventDefault(); start();});
-['pointerup','pointerleave','pointercancel'].forEach(ev=>
-  $('rec').addEventListener(ev, stop));
 addEventListener('keydown', e=>{
-  if (e.code==='Space' && !e.repeat && e.target.tagName!=='INPUT' && e.target.tagName!=='TEXTAREA'){
-    e.preventDefault(); start(); }});
-addEventListener('keyup', e=>{ if (e.code==='Space') stop(); });
+  if (e.code==='Escape' && mr && mr.state==='recording'){ stop(false); return; }
+  if (e.code==='Space' && !e.repeat && !['INPUT','TEXTAREA','SELECT','BUTTON'].includes(e.target.tagName)){
+    e.preventDefault(); start();
+  }
+});
+addEventListener('keyup', e=>{
+  if (e.code==='Space' && !['INPUT','TEXTAREA','SELECT','BUTTON'].includes(e.target.tagName)) stop(true);
+});
+
+/* ---------- quick check-in ---------- */
+$('btnok').onclick = ()=>fetch(api('/api/text'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:'[CHECK-IN] Status OK'})});
+let sosConfirm = false;
+$('btnsos').onclick = ()=>{
+  if (!sosConfirm){
+    sosConfirm = true; $('btnsos').textContent = 'Click Again to Confirm SOS';
+    setTimeout(()=>{ sosConfirm = false; $('btnsos').textContent = '! Need Help'; }, 4000);
+    return;
+  }
+  sosConfirm = false; $('btnsos').textContent = '! Need Help';
+  fetch(api('/api/text'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:'[URGENT] Requesting assistance / radio check'})});
+};
 
 /* ---------- text + file composer ---------- */
 function human(n){
-  return n < 1024 ? n + ' B'
-       : n < 1048576 ? (n/1024).toFixed(1) + ' kB'
-       : (n/1048576).toFixed(2) + ' MB';
+  return n < 1024 ? n + ' B' : n < 1048576 ? (n/1024).toFixed(1) + ' kB' : (n/1048576).toFixed(2) + ' MB';
 }
-function showCost(el, j, prefix){
-  if (!j || j.error){ el.textContent = ''; return; }
-  const slow = j.air_s > 60;
-  el.innerHTML =
-    `${prefix} ${human(j.original_bytes)}`
-    + (j.compression !== 'none'
-        ? ` → ${human(j.carried_bytes)} ${j.compression}` : ' uncompressed')
-    + `<br>${j.chunks} chunks · <b class="${slow?'slow':''}">${j.air_human}</b>`
-    + ` on air at ${j.bytes_per_s} B/s`;
-}
-function debounce(fn, ms){
-  let t; return (...a)=>{ clearTimeout(t); t = setTimeout(()=>fn(...a), ms); };
-}
-
+function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t = setTimeout(()=>fn(...a), ms); }; }
 const estText = debounce(async ()=>{
   const t = $('txt').value;
   $('sendtxt').disabled = !t.trim();
   if (!t.trim()){ $('txtcost').textContent = ''; return; }
-  try {
-    const r = await fetch(api('/api/estimate'), {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({text:t})});
-    showCost($('txtcost'), await r.json(), 'Costs');
-  } catch(e){ $('txtcost').textContent = ''; }
+  try{
+    const r = await fetch(api('/api/estimate'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:t})});
+    const j = await r.json();
+    $('txtcost').textContent = j.error ? '' : `${j.chunks} bursts · ${j.air_human}`;
+  }catch(_){ $('txtcost').textContent = ''; }
 }, 300);
 $('txt').addEventListener('input', estText);
-
+$('txt').addEventListener('keydown', e=>{
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter'){ e.preventDefault(); $('sendtxt').click(); }
+});
 $('sendtxt').onclick = async ()=>{
   const t = $('txt').value.trim(); if (!t) return;
   $('sendtxt').disabled = true;
-  try {
-    const r = await fetch(api('/api/text'), {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({text:t})});
+  try{
+    const r = await fetch(api('/api/text'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:t})});
     const j = await r.json();
-    if (j.error){ $('txtcost').textContent = 'Failed: ' + j.error; }
+    if (j.error) $('txtcost').textContent = 'Failed: ' + j.error;
     else { $('txt').value = ''; $('txtcost').textContent = ''; }
-  } catch(e){ $('txtcost').textContent = 'Failed: ' + e.message; }
+  }catch(e){ $('txtcost').textContent = 'Failed: ' + e.message; }
   estText();
 };
-
-$('fileinput').onchange = async ()=>{
-  const f = $('fileinput').files[0];
+async function handleSelectedFile(f){
   $('filename').textContent = f ? `${f.name} · ${human(f.size)}` : 'No file chosen';
   $('sendfile').disabled = !f;
   if (!f){ $('filecost').textContent = ''; return; }
-  $('filecost').textContent = 'Checking…';
   const fd = new FormData(); fd.append('file', f, f.name);
-  try {
-    const r = await fetch(api('/api/estimate'), {method:'POST', body: fd});
+  try{
+    const r = await fetch(api('/api/estimate'), {method:'POST', body:fd});
     const j = await r.json();
-    if (j.error){ $('filecost').textContent = j.error; $('sendfile').disabled = true; }
-    else { showCost($('filecost'), j, 'Costs'); }
-  } catch(e){ $('filecost').textContent = ''; }
-};
-
+    $('filecost').textContent = j.error ? '' : `${j.chunks} chunks · ${j.air_human} on air`;
+  }catch(_){ $('filecost').textContent = ''; }
+}
+$('fileinput').onchange = ()=>handleSelectedFile($('fileinput').files[0]);
+$('compose').addEventListener('dragover', e=>e.preventDefault());
+$('compose').addEventListener('drop', e=>{
+  e.preventDefault();
+  if (e.dataTransfer.files.length){ $('fileinput').files = e.dataTransfer.files; handleSelectedFile(e.dataTransfer.files[0]); }
+});
 $('sendfile').onclick = async ()=>{
   const f = $('fileinput').files[0]; if (!f) return;
   $('sendfile').disabled = true;
   const fd = new FormData(); fd.append('file', f, f.name);
-  try {
-    const r = await fetch(api('/api/file'), {method:'POST', body: fd});
+  try{
+    const r = await fetch(api('/api/file'), {method:'POST', body:fd});
     const j = await r.json();
-    if (j.error) $('filecost').textContent = 'Failed: ' + j.error;
-  } catch(e){ $('filecost').textContent = 'Failed: ' + e.message; }
+    if (j.error){ $('filecost').textContent = 'Failed: ' + j.error; $('sendfile').disabled = false; }
+    else { $('fileinput').value = ''; $('filename').textContent = 'No file chosen'; $('filecost').textContent = ''; }
+  }catch(e){ $('filecost').textContent = 'Failed: ' + e.message; $('sendfile').disabled = false; }
 };
 
-/* ---------- settings ---------- */
-function push(){
-  fetch(api('/api/settings'), {method:'POST',
+/* ---------- callsign & settings ---------- */
+$('mycall').onclick = ()=>{
+  const n = prompt('Station callsign / name (max 8 chars):', MY_CALL);
+  if (n && n.trim()){
+    fetch(api('/api/settings'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({call:n.trim()})}).then(()=>refresh());
+  }
+};
+function updateSnrLabel(v){
+  $('snrv').textContent = v + ' dB';
+  $('cliff').innerHTML = v < 9.5 ? '<b>below 9.5 dB cliff</b>' : 'margin +' + (v-9.5).toFixed(1) + ' dB';
+}
+function push(extra={}){
+  return fetch(api('/api/settings'), {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({
       auto_repair: $('auto').checked,
+      auto_adapt: $('autoadapt').checked,
+      auto_retry: $('autoretry').checked,
+      repeater: $('repeater').checked,
       pacing: $('pace').checked,
       mode: $('mode').value || undefined,
       voice_modem: $('voice').value || undefined,
       use_vad: $('vad').checked,
       save: $('save').checked,
       save_modem: $('savemodem').checked,
-      impair: {loss_pct:+$('loss').value, snr_db:+$('snr').value,
-               fade_prob:+$('fp').value/100, fade_ms:+$('fl').value}
-    })});
+      debug_tone_ms: +$('tonems').value,
+      vox_slack_ms: +$('voxslack').value,
+      tx_gain: +$('txgain').value,
+      impair: {loss_pct:+$('loss').value, snr_db:+$('snr').value, fade_prob:+$('fp').value/100, fade_ms:+$('fl').value},
+      ...extra
+    })}).then(r=>r.json());
 }
 $('loss').oninput = ()=>{ $('lossv').textContent = $('loss').value+'%'; push(); };
-$('snr').oninput = ()=>{
-  const v = +$('snr').value;
-  $('snrv').textContent = v+' dB';
-  $('cliff').innerHTML = v < 9.5
-    ? '<b>below the 9.5 dB cliff - nothing will decode</b>'
-    : 'cliff at 9.5 dB, '+(v-9.5).toFixed(1)+' dB of margin';
-  push();
-};
+$('snr').oninput = ()=>{ updateSnrLabel(+$('snr').value); push(); };
 $('fp').oninput  = ()=>{ $('fpv').textContent = $('fp').value+'%'; push(); };
 $('fl').oninput  = ()=>{ $('flv').textContent = ($('fl').value/1000).toFixed(1)+'s'; push(); };
-$('auto').onchange = push; $('pace').onchange = push;
-$('vad').onchange = push; $('mode').onchange = ()=>{ push(); refresh(); };
-$('voice').onchange = ()=>{ push(); refresh(); };
-$('save').onchange = ()=>{ push(); refresh(); };
-$('savemodem').onchange = ()=>{ push(); refresh(); };
+$('tonems').oninput = ()=>{ $('tonemsv').textContent = $('tonems').value+'ms'; push(); };
+$('voxslack').oninput = ()=>{ $('voxslackv').textContent = $('voxslack').value+'ms'; push(); };
+$('txgain').oninput = ()=>{ $('txgainv').textContent = (+$('txgain').value).toFixed(2)+'x'; push(); };
+$('chkey').onchange = ()=>push({channel_key: $('chkey').value});
+['auto','autoadapt','autoretry','repeater','pace','vad'].forEach(id=> $(id).onchange = ()=>push());
+['mode','voice','save','savemodem'].forEach(id=> $(id).onchange = ()=>push().then(()=>refresh()));
+$('simwarn').onclick = ()=>{
+  $('loss').value=0; $('fp').value=0; $('snr').value=20;
+  push({impair:{loss_pct:0, fade_prob:0, snr_db:20}}).then(()=>refresh());
+};
+$('applyadapt').onclick = ()=>fetch(api('/api/adapt_apply'), {method:'POST'}).then(()=>refresh());
+$('voxcal').onclick = ()=>fetch(api('/api/vox_calibrate'), {method:'POST'}).then(()=>{ $('txnote').textContent = 'Sent 450ms VOX calibration probe...'; });
+$('audiotest').onclick = ()=>fetch(api('/api/audio_test'), {method:'POST'});
+$('rxwavinput').onchange = async ()=>{
+  const f = $('rxwavinput').files[0]; if (!f) return;
+  const fd = new FormData(); fd.append('audio', f, f.name);
+  const r = await fetch(api('/api/rx_wav'), {method:'POST', body:fd}).then(x=>x.json());
+  log('sys', r.error ? 'RX WAV error: '+r.error : `Decoded ${r.decoded_bursts} burst(s) from ${f.name}`);
+  $('rxwavinput').value = '';
+};
 
-/* ---------- boot ---------- */
-function refresh(){
-  return fetch(api('/api/state')).then(r=>r.json()).then(s=>{
-    if (s.demo){
-      $('samplebtn').hidden = false;
-      $('savewrap').hidden = true;
-      $('savemodemwrap').hidden = true;
-      $('arch').hidden = true;
-    }
-    CHUNK_S = s.chunk_speech_s;
-    $('mycall').textContent = s.call;
-    document.title = 'crowcall · ' + s.call;
-    $('spec').innerHTML =
-      `codec2 ${s.mode} · ${s.frames_per_chunk}x${s.payload_bytes/s.frames_per_chunk}B `+
-      `= ${s.chunk_speech_s.toFixed(2)}s/chunk · ${s.realtime_ratio}x realtime<br>` +
-      `${s.transport_kind === 'modem' ? s.link.transport : 'raw bursts over udp'} · ` +
-      `udp :${s.link.port} · ${s.codec.c2enc ? 'c2enc' : 'ffmpeg libcodec2'}` +
-      `${s.codec.vad ? '' : ' · no vad'}`;
-    if (!$('mode').options.length){
-      s.modes.forEach(m=>{
-        const o=document.createElement('option'); o.value=m;
-        const g=s.geometry[m];
-        o.textContent=`${m} · ${g.bps} bps · ${g.realtime}x`;
-        $('mode').append(o);
-      });
-    }
-    MY_MODE = s.mode;
-    $('mode').value = s.mode;
-    // voice is the one mode the operator picks; hole size is the trade
-    const vo = s.voice_options || [];
-    if ($('voice').options.length !== vo.length){
-      $('voice').innerHTML = '';
-      vo.forEach(o=>{
-        const el=document.createElement('option'); el.value=o.modem;
-        el.textContent=`${o.label} \u00b7 ${o.hole_s}s holes \u00b7 ${o.realtime}x`;
-        $('voice').append(el);
-      });
-    }
-    $('voice').value = s.voice_modem;
-    const cur = vo.find(o=>o.modem === s.voice_modem);
-    $('voicehint').innerHTML = cur
-      ? `${cur.aicodix} \u00b7 ${cur.frames} frames \u00b7 ${cur.usable} B per burst`
-        + `<br>a lost chunk costs <span class="warn">${cur.hole_s}s</span> of speech`
-        + `<br>${cur.why}`
-      : '';
-    const r = s.rate;
-    const bs = Number.isInteger(r.bytes_s) ? r.bytes_s : r.bytes_s.toFixed(1);
-    // padding gets its own line: it only applies to 700C and it is the one
-    // place where the mode name and the real cost of it disagree
-    $('rt').innerHTML =
-      `${r.speech_s}s/chunk · ${bs} B/s · ${r.realtime}x realtime`
-      + (r.overhead_pct > 0
-          ? `<br><span class="warn">${r.wire_bps} bps on air `
-            + `(${r.overhead_pct}% frame padding)</span>` : '');
-    $('auto').checked = s.auto_repair;
-    $('pace').checked = s.pacing;
-    $('vad').checked = s.use_vad;
-    if (!s.codec.vad){ $('vad').disabled = true; }
-    const a = s.archive;
-    $('save').checked = a.save;
-    $('savemodem').checked = a.save_modem;
-    $('savemodem').disabled = !a.save;
-    const mb = (a.bytes/1048576);
-    $('arch').innerHTML = a.save
-      ? `${a.count} saved · ${mb < 1 ? (a.bytes/1024).toFixed(0)+' kB'
-                                     : mb.toFixed(1)+' MB'} in ${a.root}`
-        + (a.save_modem
-            ? `<br><span class="warn">modem audio is ~100 kB per burst</span>`
-            : '')
-      : 'not saving';
-    const modem = s.transport_kind === 'modem';
-    $('snrknob').hidden = !modem; $('cliff').hidden = !modem;
-    $('lossknob').hidden = modem;
-    if (modem && s.impair.snr_db !== undefined){
-      $('snr').value = s.impair.snr_db;
-      $('snr').dispatchEvent(new Event('input'));
-    }
-    return s;
-  });
+/* ---------- state & hydration ---------- */
+function applyState(s){
+  if (s.demo){ $('samplebtn').hidden = false; $('save').parentElement.hidden = true; $('savemodem').parentElement.hidden = true; $('arch').hidden = true; }
+  CHUNK_S = s.chunk_speech_s; MY_CALL = s.call; MY_MODE = s.mode; TRANSPORT = s.transport_kind;
+  $('mycall').textContent = s.call;
+  if (!document.hidden) document.title = 'crowcall · ' + s.call;
+  const isModemLike = ['modem', 'soundcard'].includes(s.transport_kind);
+  $('spec').innerHTML = `codec2 ${esc(s.mode)} · ${s.chunk_speech_s.toFixed(2)}s/chunk · ${s.realtime_ratio}x<br>`
+    + `${isModemLike ? esc(s.link.transport) : 'raw udp'} · ${s.transport_kind==='soundcard'?'audio':'udp :'+s.link.port}`;
+  $('radiocard').hidden = !isModemLike;
+
+  const h = s.health;
+  if (h){
+    const dot = h.grade === 'clean' ? 'Clean' : h.grade === 'marginal' ? 'Marginal' : 'Rough';
+    $('healthpill').textContent = `Link ${dot} (${h.delivery_pct}%${h.snr_ema_db!=null?' · '+h.snr_ema_db+' dB':''})`;
+    $('healthdetail').textContent = `Inertia: ${h.mode_inertia_pct}% · Incentive: ${h.switching_incentive_score} · Suggested: ${h.recommended.voice_label}/${h.recommended.mode} — ${h.why}`;
+    $('applyadapt').disabled = !h.needs_change;
+  }
+  const simActive = s.impair.enabled && (s.impair.loss_pct > 0 || s.impair.fade_prob > 0 || (s.transport_kind === 'modem' && s.impair.snr_db < 12));
+  $('simwarn').hidden = !simActive;
+
+  if ($('mode').options.length !== s.modes.length){
+    $('mode').innerHTML = ''; s.modes.forEach(m=>{ const o=document.createElement('option'); o.value=m; $('mode').append(o); });
+  }
+  [...$('mode').options].forEach(o=>{ const g=s.geometry[o.value]; if(g) o.textContent=`${o.value} · ${g.bps} bps · ${g.realtime}x`; });
+  $('mode').value = s.mode;
+
+  const vo = s.voice_options || [];
+  if ($('voice').options.length !== vo.length){
+    $('voice').innerHTML = '';
+    vo.forEach(o=>{ const el=document.createElement('option'); el.value=o.modem; el.textContent=`${o.label} · ${o.hole_s}s · ${o.realtime}x`; $('voice').append(el); });
+  }
+  $('voice').value = s.voice_modem;
+
+  $('auto').checked = s.auto_repair;
+  $('autoadapt').checked = s.auto_adapt;
+  $('autoretry').checked = s.auto_retry;
+  $('repeater').checked = s.repeater;
+  $('pace').checked = s.pacing;
+  $('vad').checked = s.use_vad;
+  if (!s.codec.vad) $('vad').disabled = true;
+  $('save').checked = s.archive.save;
+  $('savemodem').checked = s.archive.save_modem;
+  $('savemodem').disabled = !s.archive.save;
+  const mb = s.archive.bytes / 1048576;
+  $('arch').innerHTML = s.archive.save ? `${s.archive.count} saved · ${mb<1?(s.archive.bytes/1024).toFixed(0)+' kB':mb.toFixed(1)+' MB'} in ${esc(s.archive.root)}` : 'not saving';
+
+  $('snrknob').hidden = s.transport_kind !== 'modem';
+  $('cliff').hidden = s.transport_kind !== 'modem';
+  $('lossknob').hidden = isModemLike;
+  $('loss').value = s.impair.loss_pct; $('lossv').textContent = s.impair.loss_pct + '%';
+  const fp = Math.round((s.impair.fade_prob || 0) * 100);
+  $('fp').value = fp; $('fpv').textContent = fp + '%';
+  $('fl').value = s.impair.fade_ms; $('flv').textContent = (s.impair.fade_ms/1000).toFixed(1)+'s';
+  if (s.transport_kind === 'modem'){ $('snr').value = s.impair.snr_db; updateSnrLabel(s.impair.snr_db); }
+
+  $('tonems').value = s.debug_tone_ms || 120; $('tonemsv').textContent = $('tonems').value + 'ms';
+  $('voxslack').value = s.vox_slack_ms || 60; $('voxslackv').textContent = $('voxslack').value + 'ms';
+  $('txgain').value = s.tx_gain || 1.0; $('txgainv').textContent = (+$('txgain').value).toFixed(2) + 'x';
+
+  if (s.link && s.link.vu){
+    const v = s.link.vu;
+    const pct = Math.max(0, Math.min(100, ((v.db + 60) / 60) * 100));
+    $('vubar').style.width = pct + '%';
+    $('vubar').className = (v.clipping || v.last_burst_clipped) ? 'clip' : (v.peak > 0.85 ? 'hot' : '');
+    $('vustatus').textContent = v.clipping ? 'CLIPPING — LOWER RADIO VOLUME'
+      : (v.last_burst_peak > 0 && v.last_burst_peak < 0.12) ? `LOW AUDIO (${v.db} dBFS) — AGC ASSISTING`
+      : `RX ${v.db} dBFS · gate ${v.gate_open?'OPEN':'closed'} · tone ${s.link.last_rx_tone_ms ?? '-'}ms`;
+  }
 }
-refresh().then(s=> log('sys',
-  `station ${s.call} up, codec2 ${s.mode}, `+
-  `${s.transport_kind === 'modem' ? 'real modem' : 'raw bursts'}`));
-setInterval(()=>fetch(api('/api/state')).then(r=>r.json()).then(s=>{
-  $('fadestate').innerHTML = s.impair.fading
-    ? '<span class="fade">channel faded out</span>' : '';
-  const a = s.archive, mb = a.bytes/1048576;
-  if (a.save) $('arch').innerHTML =
-    `${a.count} saved · ${mb < 1 ? (a.bytes/1024).toFixed(0)+' kB'
-                                 : mb.toFixed(1)+' MB'} in ${a.root}`
-    + (a.save_modem
-        ? `<br><span class="warn">modem audio is ~100 kB per burst</span>` : '');
-}), 2000);
+function refresh(){ return fetch(api('/api/state')).then(r=>r.json()).then(s=>{ applyState(s); return s; }); }
+
+function hydrateHistory(){
+  fetch(api('/api/recordings')).then(r=>r.json()).then(data=>{
+    const recs = (data.records || []).filter(r=>r.meta && r.meta.finished).slice(0, 25).reverse();
+    recs.forEach(rec=>{
+      const m = rec.meta, id = 'hist:' + rec.id;
+      if (seen[id]) return;
+      const el = row(id);
+      el.querySelector('.who').textContent = m.direction === 'tx' ? 'YOU' : (m.callsign || '?');
+      el.querySelector('.meta').textContent = `msg ${m.msg_id||'?'} · ${m.kind||'voice'} · ${m.chunks||m.total||1} chunks`;
+      tape(el, m.strip || Array(m.chunks || m.total || 1).fill('ok'));
+      if ((rec.have || []).includes('speech.wav')){
+        el.querySelector('.player').innerHTML = `<audio controls preload="none" src="/api/recordings/${encodeURIComponent(rec.id)}/file/speech.wav"></audio>`;
+      }
+      saved(el, rec.id, m.kind, m.file_name);
+    });
+  }).catch(()=>{});
+}
+
+refresh().then(s=>{
+  log('sys', `station ${s.call} up (${s.transport_kind})`);
+  hydrateHistory();
+  if (s.transport_kind === 'soundcard'){
+    fetch(api('/api/devices')).then(r=>r.json()).then(d=>{
+      if (d.ok && d.devices){
+        $('audiodev').innerHTML = d.devices.map(x=>`<option value="${x.index}">${esc(x.name)} (${x.in}/${x.out})</option>`).join('');
+      }
+    }).catch(()=>{});
+  }
+});
+setInterval(()=>fetch(api('/api/state')).then(r=>r.json()).then(applyState).catch(()=>{}), 2000);
 </script>
 </body>
 </html>
