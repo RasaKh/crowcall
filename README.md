@@ -77,6 +77,26 @@ All four profiles sit on the measured **~9.9 dB in-band SNR acquisition floor** 
 
 ---
 
+## Under the Hood: Adaptive Link Control & Protocol Design
+
+### Control-Theory Link Adaptation (`LinkHealthTracker`)
+Because all four `aicodix` PSK profiles share the ~9.9 dB AWGN floor, mode switching doesn't trade raw sensitivity—it trades **burst duration & hole size** against **RF air time**. Shorter bursts (`control` / `compact`, 1.21 s) slip between multipath fades and shrink lost-speech holes, while longer bursts (`bulk` 2.17 s, `fast` 3.68 s) cut total transmit time roughly in half on clean links.
+
+To adapt without mode-hopping, `LinkHealthTracker` in `protocol.py` implements a dual-EMA hysteresis controller:
+
+* **Dual-EMA Slew-Rate Crash Detection:** Tracks both a **Slow EMA** ($\alpha = 0.15$, long-term baseline) and a **Fast EMA** ($\alpha = 0.50$, short-term transient) for delivery ratio and SNR, alongside SNR volatility (`snr_dev_ema`). A steep negative slew (`delivery_ema - fast_delivery_ema >= 0.28`), 3 consecutive burst drops, or `fast_snr_ema <= 10.3 dB` triggers `downshift_urgency`—bypassing dwell timers (`0 s`) to step down immediately before a transfer collapses.
+* **Mode Inertia (Tenure Stickiness) & Hysteresis Deadbands:** As the current mode accumulates consecutive healthy bursts (`tenure_streak`), it earns `mode_inertia` (`0.0`–`1.0`), widening the hysteresis deadbands (up to `+6%` delivery and `+1.5 dB` SNR) and stretching upshift dwell time from `60 s` to `150 s` so a proven mode ignores minor fluctuations.
+* **High-Headroom Switching Incentive:** When link headroom is overwhelmingly high (`snr_ema >= 19.0 dB`, jitter `< 1.2 dB`, `fast_delivery_ema >= 0.97`), `upshift_incentive` overrides inertia and halves upshift dwell to `30 s` so stations don't linger in slow modes on clear channels.
+* **Bidirectional Feedback & Zero-Sync Switching:** Transmit-only stations still adapt because inbound `T_RREQ` loss counts and `T_DONE` receipts feed the tracker (with automatic safe fallback to `Fine + 700C` after two unconfirmed sends). Because every burst's BCH + v3 header is self-describing and `outbox` snapshots the mode when queued, sender and receiver never fall out of sync mid-message.
+
+### Additional Engineering Details
+* **Split TX Locks (`_data_tx_lock` vs. `_tx_lock`):** Multi-chunk transfers hold `_data_tx_lock` while `_send()` acquires `_tx_lock` only per burst, allowing urgent `T_RREQ`, `T_RACK`, and `T_DONE` control bursts to slip in between data bursts during pacing gaps.
+* **Arithmetic Finish-Time Prediction:** Rather than guessing end-of-transmission from silence, `Assembler.expected_duration()` computes `expect_until` from `total * modem.air_s` carried in every chunk header, preventing premature repair requests during slow `fast`-mode transfers.
+* **Prefix-First & Prefix-Last Data Ordering:** `data_order()` transmits chunk `0` (which holds exact byte length, filename, and CRC32) both first and last on multi-chunk transfers so a fade at either end doesn't strand an intact payload.
+* **Zero-Overhead Encrypt-then-MAC (`--key`):** Uses the 60-byte header (with CRC zeroed) as the per-burst nonce for a `BLAKE2s` counter-mode keystream and replaces CRC32 with a 32-bit truncated `HMAC-SHA256`—adding 0 bytes of wire overhead while binding `ptype`, `origin`, `destination`, `msg_id`, `chunk_idx`, and `hops`.
+
+---
+
 ## Verification
 
 ```bash
