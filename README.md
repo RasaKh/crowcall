@@ -95,6 +95,12 @@ To adapt without mode-hopping, `LinkHealthTracker` in `protocol.py` implements a
 * **Prefix-First & Prefix-Last Data Ordering:** `data_order()` transmits chunk `0` (which holds exact byte length, filename, and CRC32) both first and last on multi-chunk transfers so a fade at either end doesn't strand an intact payload.
 * **Zero-Overhead Encrypt-then-MAC (`--key`):** Uses the 60-byte header (with CRC zeroed) as the per-burst nonce for a `BLAKE2s` counter-mode keystream and replaces CRC32 with a 32-bit truncated `HMAC-SHA256`—adding 0 bytes of wire overhead while binding `ptype`, `origin`, `destination`, `msg_id`, `chunk_idx`, and `hops`.
 
+### Selective ARQ, Packet Requests & Voice/File Repair
+* **Addressed Repair Requests (`T_RREQ`):** Once `expect_until` (or `stall_timeout`) passes and the channel is quiet for `quiet_timeout` (`max(3.0, 3.0 * modem.air_s)`), the receiver sends a single `control` burst (`T_RREQ`) addressed to the origin station (`RQ3` + target `station_id`). `encode_missing()` automatically picks the smaller of a **2-byte index list** (`RREQ_LIST`, cheapest for sparse loss) or a **bitmask** (`RREQ_BITMAP`, covering hundreds of chunks in one burst under heavy loss).
+* **`T_RACK`, `T_RNAK` & `T_DONE` Handshake:** Unrelated stations stay silent when they overhear a `T_RREQ` for someone else. The origin replies with `T_RACK` and resends only the requested chunks, or sends `T_RNAK` (if declined or evicted from `outbox`) so the receiver finalizes immediately instead of hanging. When all chunks arrive, the receiver sends `T_DONE` so the sender marks the message `CONFIRMED`.
+* **Opportunistic Scavenging & Late Retry:** `Station.inbox` keys transfers by `(origin, msg_id)`, so any overheard repair or repeater chunks automatically heal every listening station's partial `Assembler`. If a transfer finalizes degraded while out of range, clicking **Ask for missing** (`POST /api/retry/<mid>`) requests only the remaining chunks later without restarting from scratch.
+* **Voice Concealment vs. File Integrity:** Missing voice chunks are concealed by repeating the last received Codec2 frame (a held sound rather than a click), whereas missing text/file chunks are zero-filled and checked against the `STREAM_FMT` CRC32 so a damaged file is never presented as intact.
+
 ---
 
 ## Verification
