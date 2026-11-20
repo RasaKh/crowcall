@@ -2,23 +2,45 @@
 
 **Off-grid, store-and-forward voice, text, and file messenger for analog radios.**
 
-`crowcall` turns any laptop or Raspberry Pi (and any phone browser on its local Wi-Fi) into a digital radio terminal over ordinary analog radios—VHF/UHF walkie-talkies, CB, or HF/SSB—using **Codec2** speech compression and the **aicodix** OFDM/polar-coded audio modem. It is built for grid-down and zero-infrastructure environments where there is no internet, no cell service, and no repeater infrastructure.
+`crowcall` turns a laptop or Raspberry Pi (and any phone browser on its local Wi-Fi) into a digital radio terminal over ordinary analog radios—VHF/UHF handhelds, CB, or HF/SSB—using **Codec2** speech compression and the **aicodix** OFDM/polar-coded audio modem. It is built for grid-down and zero-infrastructure environments where there is no internet, cellular network, or repeater infrastructure.
 
 ---
 
-## Why Store-and-Forward Radio?
+## Design Philosophy: Minimal Air Time & Effective Links
 
-Live digital voice drops out completely the moment a fade hits. `crowcall` instead slices voice, text, or small files into numbered, CRC/HMAC-checked bursts (~1.2–3.7 s each) and transmits them in interleaved order:
+On radio, **every extra second on the air increases detectability, battery drain, and collision risk**. `crowcall` is designed around a deliberate balance: keep RF transmissions as short and infrequent as possible while still guaranteeing reliable delivery over noisy or fading channels.
 
-1. **Voice** is recorded in the browser (or phone mic), stripped of silence with optional Silero VAD, compressed with Codec2 (`700C`–`3200`), and sent as chunks. Missing chunks are concealed by repeating the last frame or recovered via selective ARQ repair (`T_RREQ` / `T_RACK` / `T_DONE`).
-2. **Text & files** are compressed with `zlib` (when smaller than raw), prefixed with exact length, filename, and CRC32, and chunked for byte-exact reassembly.
-3. **Zero-configuration receiver:** Every burst carries its modulation, Codec2 rate, hop count, and transfer metadata in a BCH-coded OFDM frame header + 60-byte Crowcall v3 header, so sender and receiver never need to match settings beforehand.
+* **Silero VAD Silence Stripping (`pysilero-vad`):** Removes dead air and pauses at 16 kHz before encoding, often cutting voice air time by 30–50% without clipping word edges (and safely falling back to untrimmed audio if no speech is detected).
+* **Codec2 + Opportunistic Compression:** Voice is encoded at `700C`–`3200` bps (`100`–`400` B/s), and text/files are `zlib`-compressed only when compression actually shrinks the payload—never wasting a burst on already-compressed data.
+* **Selective ARQ & Interleaving:** Bursts are sent in interleaved order so short fades scatter rather than wipe out contiguous speech, and repair (`T_RREQ` / `T_RACK` / `T_DONE`) retransmits only the exact missing chunks rather than the whole message.
+* **Adaptive Link Health (`LinkHealthTracker`):** All four `aicodix` PSK profiles share the ~9.9 dB acquisition floor. On clean links, `crowcall` steps up to `Quick` (`bulk`, ~0.5x realtime) to minimize transmit duration; when dual-EMA telemetry detects fading or a sudden SNR drop, it steps down to `Fine` (`control`) + `700C` to shrink lost-chunk holes and recover cleanly.
 
 ---
 
-## Quick Start (Real Radio via Soundcard)
+## Capabilities & Operation Modes
 
-### Dependencies & Build
+* **Analog Radio Soundcard Mode (`--soundcard`):** Connects to any radio via 3.5 mm audio cable or acoustic coupling. Includes half-duplex RX self-mute during TX, live RX VU meter with clipping alerts, software RX AGC, TX `tanh` soft-limiting, optional pilot-tone/VOX calibration, and automatic USB audio hot-plug recovery.
+* **Simplex Store-and-Forward Repeater (`--repeater`):** Turns a single radio + laptop/Pi into a single-frequency digipeater that relays complete messages across terrain obstacles while preserving original `msg_id`, `origin`, and a 2-bit hop limit (`MAX_HOPS = 3`).
+* **Encrypted Channel Mode (`--key`):** Zero-overhead Encrypt-then-MAC (`BLAKE2s` counter-mode stream cipher + 32-bit truncated `HMAC-SHA256`) using a pre-shared passphrase.
+* **Fire-and-Forget Delivery (`auto_retry`) & Reboot Resilience:** Unconfirmed messages retry with exponential backoff, wake immediately when any peer traffic or beacon is heard, and hydrate the outbox from `recordings/` on startup so repair requests survive power loss.
+* **Sneakernet / Zero-Cable Mode:** Export any outbox message as a ready-to-play 48 kHz `.wav` (`/api/tx_wav/<mid>`) or upload recorded radio audio (`/api/rx_wav`) to decode offline.
+* **Field Appliance Web UI (`--host 0.0.0.0`):** Accessible from smartphones over a local hotspot with hold-to-PTT or tap-to-latch voice recording, mobile HTTP mic capture fallback, 1-click `[Check-In: OK]` / `[! Need Help]` bursts, nearby-station roster, message history hydration, and **Dusk / Daylight / Night Red** themes.
+* **Local Lab Simulator (`--modem` / raw UDP):** In-process auto-hub with real-time AWGN SNR, static loss, and time-window fade simulation for testing without RF hardware.
+
+---
+
+## Example Scenarios
+
+* **Low-Profile Tactical Check-In:** Send `[CHECK-IN] Status OK` or a short `700C` + Silero VAD voice note in 1–2 bursts (~1.2–2.4 s on air) for minimal RF signature and rapid confirmation via `T_DONE`.
+* **Ridge / Hilltop Relay:** Place a battery-powered Pi + handheld radio on high ground with `python3 app.py --call RELAY1 --soundcard --repeater` to bridge two stations blocked by terrain on a single simplex channel.
+* **Private Team Net:** Launch stations with `--key "team-passphrase"` (or set it in the UI) so unauthorized listeners cannot decode or inject bursts, with zero extra header bytes.
+* **Zero-Cable Phone + Walkie-Talkie:** Download `tx.wav` from the web UI onto a phone, play it into a handheld radio's microphone, and decode incoming recordings later via `/api/rx_wav`.
+* **Offline Lab Testing:** Run two stations locally with `--modem` to observe real `aicodix` decode behavior across the 9.5 dB SNR cliff and multi-second fades.
+
+---
+
+## Dependencies & Build
+
 ```bash
 sudo apt install codec2 ffmpeg g++ make
 pip install flask flask-socketio numpy sounddevice   # pysilero-vad is optional
@@ -28,30 +50,21 @@ cd crowcall
 make
 ```
 
-> `vendor/{code,dsp,modem,disorders}` are git submodules tracking the upstream `aicodix` repositories. Running `make` initializes submodules (if needed) and builds the `encode`/`decode` and channel disorder binaries. `AicodixModem` also auto-compiles `vendor/modem` on first run if binaries are missing.
+> `vendor/{code,dsp,modem,disorders}` are git submodules tracking the upstream `aicodix` repositories. Running `make` initializes submodules (if needed) and builds `encode`/`decode` and the channel disorder tools. `AicodixModem` also auto-compiles `vendor/modem` on first run if binaries are missing.
 
-### Run on a Radio (`--soundcard`)
-Connect your laptop's audio interface (or 3.5 mm cable / acoustic coupling) to a radio with VOX enabled:
-
+### Quick Start
 ```bash
-python3 app.py --call ALPHA --soundcard --debug-tone 800 --host 0.0.0.0
+# Real radio via soundcard (accessible from LAN/phone hotspot)
+python3 app.py --call ALPHA --soundcard --host 0.0.0.0
+
+# Local two-station simulation with real aicodix OFDM audio over UDP
+python3 app.py --call ALPHA --port 5001 --modem --debug-tone 800
+python3 app.py --call BRAVO --port 5002 --modem --debug-tone 1200
 ```
-
-Open `http://127.0.0.1:5001` (or `http://<laptop-ip>:5001` from a smartphone on the same hotspot).
-
-### Hardware & Off-Grid Features
-* **VOX Wakeup Tone & Auto-Calibration:** Prepends a configurable pilot tone (`--debug-tone`, default 120 ms) to key VOX before the OFDM preamble. `strip_debug_tone_info()` measures the surviving tail so VOX-chopped audio never eats into the sync preamble. Click **Calibrate VOX & Level** in the UI to measure the far radio's exact VOX cutoff and auto-adjust `debug_tone_ms` and `tx_gain` over the air.
-* **Open-Squelch & VOX Hang-Time Handling:** `BurstDetector` tracks peak-relative RMS to close bursts cleanly across open-squelch inter-burst gaps, while `SoundcardTransport` enforces half-duplex RX self-mute during TX and a 1200 ms VOX turnaround guard before replying.
-* **Live RX VU Meter, Software AGC & Hot-Plug Watchdog:** Normalizes quiet bursts, soft-limits hot TX (`tanh`), alerts on ADC clipping, and automatically reopens `sounddevice.InputStream` if a USB audio dongle is bumped or replugged.
-* **Simplex Store-and-Forward Repeater (`--repeater`):** Relays complete messages across terrain obstacles on a single frequency while preserving original `msg_id`, `origin`, and a 2-bit hop limit (`MAX_HOPS = 3`).
-* **Fire-and-Forget Delivery (`auto_retry`):** Unconfirmed messages retry with exponential backoff and wake immediately when any beacon or traffic is heard from a peer.
-* **Optional Channel Encryption (`--key`):** Zero-overhead Encrypt-then-MAC (`BLAKE2s` counter-mode stream cipher + 32-bit truncated `HMAC-SHA256`) using a pre-shared passphrase.
-* **Sneakernet / Zero-Cable Mode:** Export any outbox message as a ready-to-play 48 kHz `.wav` (`/api/tx_wav/<mid>`) or upload a recorded radio `.wav` (`/api/rx_wav`) to decode offline.
-* **Mobile & Field UX:** Hold-to-PTT or tap-to-latch voice recording, mobile HTTP mic capture fallback, editable callsign, Dusk / Daylight / Night Red themes, and persistent `recordings/` history hydration.
 
 ---
 
-## Modem Profiles & Link Health Adaptation
+## Modem Profiles
 
 All four profiles sit on the measured **~9.9 dB in-band SNR acquisition floor** using constant-envelope PSK:
 
@@ -61,24 +74,6 @@ All four profiles sit on the measured **~9.9 dB in-band SNR acquisition floor** 
 | `compact` | QPSK 5/6 short | 153 B | 1.21 s | 126 B/s | Balanced voice, short text |
 | `bulk` | 8PSK 3/4 short | 708 B | 2.17 s | 326 B/s | Quick voice, medium text |
 | `fast` | 8PSK 3/4 normal | 1476 B | 3.68 s | 401 B/s | Files |
-
-`LinkHealthTracker` monitors dual-EMA burst delivery, SNR, and jitter with mode inertia, hysteresis deadbands, and slew-rate crash detection to automatically step down to `Fine + 700C` on rough/fading links and step back up when headroom returns.
-
----
-
-## Local Lab Simulation (UDP)
-
-For testing two stations on one machine without radio hardware, `app.py` automatically starts an in-process UDP hub when `--soundcard` is not set (or you can run `python3 hub.py` separately):
-
-```bash
-# Terminal 1 (real aicodix OFDM audio over UDP)
-python3 app.py --call ALPHA --port 5001 --modem --debug-tone 800
-
-# Terminal 2
-python3 app.py --call BRAVO --port 5002 --modem --debug-tone 1200
-```
-
-Omit `--modem` to ship raw protocol bursts over UDP for rapid protocol testing. The **Advanced & Channel Simulator** drawer lets you inject AWGN SNR, static packet loss, and Rayleigh-like time-window fades.
 
 ---
 
@@ -98,5 +93,5 @@ python3 tests/test_e2e.py         # two-station voice, text, file, and ARQ repai
 
 * **[aicodix](https://github.com/aicodix) (`modem`, `code`, `dsp`, `disorders`)** by **Ahmet Inan** (`inan@aicodix.de`) — provides the underlying OFDM audio modem, BCH frame headers, systematic polar-coded FEC, Schmidl-Cox synchronization, DSP building blocks, and channel impairment tools.
 * **[Codec2](https://github.com/drowe67/codec2)** by **David Rowe (VK5DGR)** and contributors — provides the ultra-low-bitrate open-source speech codec (`700C`–`3200` bps) that makes voice messaging viable over narrowband analog radio channels.
-* **[Silero VAD](https://github.com/snakers4/silero-vad)** (`pysilero-vad`) — optional voice activity detection used to strip dead air before encoding.
+* **[Silero VAD](https://github.com/snakers4/silero-vad)** (`pysilero-vad`) — optional neural voice activity detection used to strip dead air before encoding.
 * **[FFmpeg](https://ffmpeg.org/)**, **[NumPy](https://numpy.org/)**, **[sounddevice](https://python-sounddevice.readthedocs.io/)** (PortAudio), and **[Flask](https://flask.palletsprojects.com/) / [Flask-SocketIO](https://flask-socketio.readthedocs.io/)** — audio transcoding, array DSP, soundcard I/O, and the offline-capable local web UI.
